@@ -13,6 +13,7 @@
     "./common/actor-avatar": "./common/actor-avatar.tsx",
     "./common/markdown": "./common/markdown.tsx",
     "./editor": "./editor/index.ts",
+    "./file-preview": "./file-preview/index.ts",
     "./issues/components": "./issues/components/index.ts",
     "./issues/hooks": "./issues/hooks/index.ts",
     "./issues/utils/filter": "./issues/utils/filter.ts",
@@ -87,7 +88,10 @@
     "remark-breaks": "^4.0.0",
     "remark-gfm": "^4.0.1",
     "remark-math": "catalog:",
-    "sonner": "^2.0.7"
+    "sonner": "^2.0.7",
+    "xlsx": "catalog:",
+    "papaparse": "catalog:",
+    "docx-preview": "catalog:"
   },
   "peerDependencies": {
     "@tanstack/react-query": "catalog:",
@@ -102,6 +106,7 @@
   "devDependencies": {
     "@multica/tsconfig": "workspace:*",
     "@testing-library/jest-dom": "catalog:",
+    "@types/papaparse": "catalog:",
     "@testing-library/react": "catalog:",
     "@testing-library/user-event": "catalog:",
     "@types/react": "catalog:",

@@ -52,6 +52,12 @@ catalog:
   # Product analytics
   posthog-js: "^1.176.1"
 
+  # File preview renderers
+  xlsx: "^0.18.5"
+  papaparse: "^5.4.1"
+  "@types/papaparse": "^5.3.14"
+  docx-preview: "^0.3.5"
+
   # Testing
   vitest: "^4.1.0"
   jsdom: "^29.0.1"
