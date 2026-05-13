@@ -7,6 +7,7 @@ import { useWorkspaceId } from "@multica/core/hooks";
 import { useWorkspacePaths } from "@multica/core/paths";
 import { useModalStore } from "@multica/core/modals";
 import { useIssueDraftStore } from "@multica/core/issues/stores/draft-store";
+import { agentListOptions } from "@multica/core/workspace/queries";
 import {
   inboxListOptions,
   deduplicateInboxItems,
@@ -22,6 +23,7 @@ import {
 } from "@multica/core/inbox/mutations";
 
 import { IssueDetail } from "../../issues/components";
+import { ActorAvatar } from "../../common/actor-avatar";
 import { ErrorBoundary } from "@multica/ui/components/common/error-boundary";
 import { useNavigation } from "../../navigation";
 import { toast } from "sonner";
@@ -33,6 +35,8 @@ import {
   BookCheck,
   ListChecks,
   ArrowLeft,
+  Bot,
+  ChevronDown,
 } from "lucide-react";
 import type { InboxItem } from "@multica/core/types";
 import { Button } from "@multica/ui/components/ui/button";
@@ -71,7 +75,50 @@ export function InboxPage() {
 
   const wsId = useWorkspaceId();
   const { data: rawItems = [], isLoading: loading } = useQuery(inboxListOptions(wsId));
-  const items = useMemo(() => deduplicateInboxItems(rawItems), [rawItems]);
+  const { data: workspaceAgents = [] } = useQuery(agentListOptions(wsId));
+
+  // Single-select agent filter (null = "All agents"). Not persisted — resets
+  // on remount, as agreed in the RFC.
+  const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null);
+
+  // Agents that have actually sent something into this inbox. We surface only
+  // these in the dropdown so the menu doesn't list every workspace agent —
+  // most of which have never produced a notification for the current user.
+  const agentOptions = useMemo(() => {
+    const seen = new Set<string>();
+    for (const item of rawItems) {
+      if (item.actor_type === "agent" && item.actor_id) seen.add(item.actor_id);
+    }
+    return workspaceAgents.filter((a) => seen.has(a.id));
+  }, [rawItems, workspaceAgents]);
+
+  // Drop the filter if the currently selected agent no longer has any
+  // notifications (e.g. its only item was archived) so the UI doesn't get
+  // stuck on an empty filtered view with no obvious recovery.
+  useEffect(() => {
+    if (selectedAgentId && !agentOptions.some((a) => a.id === selectedAgentId)) {
+      setSelectedAgentId(null);
+    }
+  }, [selectedAgentId, agentOptions]);
+
+  // Filter BEFORE dedupe: dedupe collapses to the newest notification per
+  // issue, so filtering after dedupe would drop agent-sourced notifications
+  // when the newest item on that issue happens to be from someone else.
+  const filteredRawItems = useMemo(() => {
+    if (!selectedAgentId) return rawItems;
+    return rawItems.filter(
+      (i) => i.actor_type === "agent" && i.actor_id === selectedAgentId,
+    );
+  }, [rawItems, selectedAgentId]);
+
+  const items = useMemo(
+    () => deduplicateInboxItems(filteredRawItems),
+    [filteredRawItems],
+  );
+
+  const selectedAgent = selectedAgentId
+    ? agentOptions.find((a) => a.id === selectedAgentId) ?? null
+    : null;
 
   const selected = items.find((i) => (i.issue_id ?? i.id) === selectedKey) ?? null;
 
@@ -194,12 +241,57 @@ export function InboxPage() {
 
   const listHeader = (
     <PageHeader className="justify-between">
-      <div className="flex items-center gap-2">
+      <div className="flex items-center gap-2 min-w-0">
         <h1 className="text-sm font-semibold">{t(($) => $.page.title)}</h1>
         {unreadCount > 0 && (
           <span className="text-xs text-muted-foreground">
             {unreadCount}
           </span>
+        )}
+        {agentOptions.length > 0 && (
+          <DropdownMenu>
+            <DropdownMenuTrigger
+              render={
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="h-7 gap-1 px-2 text-xs text-muted-foreground min-w-0"
+                />
+              }
+            >
+              {selectedAgent ? (
+                <ActorAvatar
+                  actorType="agent"
+                  actorId={selectedAgent.id}
+                  size={16}
+                />
+              ) : (
+                <Bot className="h-3.5 w-3.5" />
+              )}
+              <span className="truncate">
+                {selectedAgent
+                  ? selectedAgent.name
+                  : t(($) => $.filter.all_agents)}
+              </span>
+              <ChevronDown className="h-3 w-3 shrink-0" />
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="start" className="w-auto min-w-44">
+              <DropdownMenuItem onClick={() => setSelectedAgentId(null)}>
+                <Bot className="h-4 w-4" />
+                {t(($) => $.filter.all_agents)}
+              </DropdownMenuItem>
+              <DropdownMenuSeparator />
+              {agentOptions.map((a) => (
+                <DropdownMenuItem
+                  key={a.id}
+                  onClick={() => setSelectedAgentId(a.id)}
+                >
+                  <ActorAvatar actorType="agent" actorId={a.id} size={16} />
+                  <span className="truncate">{a.name}</span>
+                </DropdownMenuItem>
+              ))}
+            </DropdownMenuContent>
+          </DropdownMenu>
         )}
       </div>
       <DropdownMenu>

@@ -9,6 +9,9 @@
     "archive_all_read": "归档全部已读",
     "archive_completed": "归档已完成"
   },
+  "filter": {
+    "all_agents": "全部智能体"
+  },
   "list": {
     "empty": "暂无通知",
     "mark_done_tooltip": "标为已完成",

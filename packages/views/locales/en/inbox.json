@@ -9,6 +9,9 @@
     "archive_all_read": "Archive all read",
     "archive_completed": "Archive completed"
   },
+  "filter": {
+    "all_agents": "All agents"
+  },
   "list": {
     "empty": "No notifications",
     "mark_done_tooltip": "Mark as done",
