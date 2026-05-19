@@ -113,17 +113,6 @@
     "step1_label": "Install the Multica CLI",
     "step2_label": "Start the daemon"
   },
-  "starter_content": {
-    "title": "Welcome — add starter tasks?",
-    "description_prefix": "A ",
-    "description_term": "Getting Started",
-    "description_suffix": " project with short tasks that walk through how agents, issues, and context work in Multica.",
-    "dismiss_action": "Start blank workspace",
-    "import_action": "Add starter tasks",
-    "success_toast": "Starter tasks added — check your sidebar",
-    "import_failed": "Import failed — please retry",
-    "dismiss_failed": "Could not dismiss — please retry"
-  },
   "cloud_waitlist": {
     "intro_main": "Cloud runtimes aren't live yet. Leave your email and we'll reach out when they are.",
     "intro_warning": "Heads-up: agents can't execute tasks without a runtime — if you hit Skip now, your workspace is read-only until you come back and install one.",
@@ -190,6 +179,20 @@
     "add_more_hint": "Add more agents anytime. A small team of specialized agents beats one jack-of-all-trades.",
     "docs_link": "Creating your first agent →"
   },
+  "step_teammate": {
+    "eyebrow": "First teammate",
+    "headline": "Create your first teammate: Multica Helper",
+    "lede": "Multica Helper is a starter agent connected to {{runtime}}. It will open your first guided issue and help you learn the core workflow.",
+    "avatar_label": "Multica Helper avatar",
+    "name": "Multica Helper",
+    "role": "Onboarding guide",
+    "point_issue": "Starts from one onboarding issue",
+    "point_context": "Uses your workspace context and issue details",
+    "point_customize": "You can rename or replace it later",
+    "footer_hint": "We'll create one agent and one onboarding issue.",
+    "create_action": "Create Multica Helper",
+    "create_failed": "Failed to create Multica Helper"
+  },
   "step_workspace": {
     "eyebrow_first": "Your first workspace",
     "eyebrow_resume": "Pick up or start fresh",
@@ -232,8 +235,8 @@
     "perk_invite": "Invite teammates — they see only this workspace",
     "perk_switch": "Switch to other workspaces anytime from the top-left",
     "next_runtime": "Connect a computer so your agents have somewhere to run",
-    "next_agent": "Create your first agent matched to your role",
-    "next_starter": "Watch it pick up a starter task and reply",
+    "next_agent": "Create Multica Helper from your connected runtime",
+    "next_starter": "Open one onboarding issue for your next step",
     "preview": {
       "inbox_label": "Inbox",
       "inbox_meta": "your notifications",
