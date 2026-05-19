@@ -2916,4 +2916,16 @@ func TestInjectRuntimeConfigAssignmentTriggerMentionsRecent(t *testing.T) {
 			t.Errorf("assignment Workflow missing --recent guidance %q\n---\n%s", want, s)
 		}
 	}
+	// The previous wording framed `--recent` as a replacement ("you may
+	// switch to ..."), which conflicts with the mandatory full-history
+	// rule. Pin that the replacement semantics never reappears — `--recent`
+	// is a paging strategy, not a shortcut.
+	for _, banned := range []string{
+		"you may switch to",
+		"switch to `--recent",
+	} {
+		if strings.Contains(s, banned) {
+			t.Errorf("assignment Workflow regressed to replacement-style --recent phrasing %q\n---\n%s", banned, s)
+		}
+	}
 }
