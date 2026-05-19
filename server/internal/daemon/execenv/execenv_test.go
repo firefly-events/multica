@@ -825,7 +825,9 @@ func TestWriteContextFilesOpencodeNativeSkills(t *testing.T) {
 	// parseable frontmatter `name`. The synthesized frontmatter must lead
 	// with `name:` matching the parent directory slug and carry the
 	// description verbatim from the DB so OpenCode's `skill` tool can route
-	// the model to it by name.
+	// the model to it by name. The description is always double-quoted so
+	// values that happen to be YAML keywords (`null`, `true`, `[foo]`,
+	// etc.) still parse as strings and don't get dropped.
 	prefix := body
 	if len(prefix) > 120 {
 		prefix = prefix[:120]
@@ -833,8 +835,8 @@ func TestWriteContextFilesOpencodeNativeSkills(t *testing.T) {
 	if !strings.HasPrefix(body, "---\nname: go-conventions\n") {
 		t.Errorf("SKILL.md missing synthesized frontmatter name; got: %q", prefix)
 	}
-	if !strings.Contains(body, "description: Follow our internal Go style.") {
-		t.Errorf("SKILL.md missing synthesized description; got: %q", prefix)
+	if !strings.Contains(body, `description: "Follow our internal Go style."`) {
+		t.Errorf("SKILL.md missing synthesized quoted description; got: %q", prefix)
 	}
 
 	// Supporting files should also be under .opencode/skills/.
@@ -888,6 +890,43 @@ func TestWriteContextFilesPreservesExistingSkillFrontmatter(t *testing.T) {
 	}
 	if string(skillMd) != preExisting {
 		t.Errorf("SKILL.md was rewritten; got:\n%s\nwant:\n%s", skillMd, preExisting)
+	}
+}
+
+// Some upstream skills (GitHub imports, Skills.sh) ship a frontmatter block
+// that sets `description` but omits `name` — the directory layout is what
+// identifies the skill there. OpenCode's scanner requires a parseable `name`
+// in the frontmatter or it silently drops the SKILL.md. The writer must
+// inject `name: <slug>` into the existing block (not replace it) so the
+// upstream description and body still ride along intact.
+func TestWriteContextFilesInjectsNameIntoNamelessFrontmatter(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+
+	preExisting := "---\ndescription: Review pull requests\n---\n\nbody"
+	ctx := TaskContextForEnv{
+		IssueID: "inject-name-test",
+		AgentSkills: []SkillContextForEnv{
+			{
+				Name:        "Review PRs",
+				Description: "DB description ignored when content already carries one",
+				Content:     preExisting,
+			},
+		},
+	}
+
+	if err := writeContextFiles(dir, "opencode", ctx); err != nil {
+		t.Fatalf("writeContextFiles failed: %v", err)
+	}
+
+	skillMd, err := os.ReadFile(filepath.Join(dir, ".opencode", "skills", "review-prs", "SKILL.md"))
+	if err != nil {
+		t.Fatalf("failed to read SKILL.md: %v", err)
+	}
+	got := string(skillMd)
+	want := "---\nname: review-prs\ndescription: Review pull requests\n---\n\nbody"
+	if got != want {
+		t.Errorf("SKILL.md was not patched correctly;\n got: %q\nwant: %q", got, want)
 	}
 }
 

@@ -175,42 +175,94 @@ func resolveSkillsDir(workDir, provider string) (string, error) {
 
 var nonAlphaNum = regexp.MustCompile(`[^a-z0-9]+`)
 
-// ensureSkillFrontmatter returns SKILL.md content guaranteed to start with a
-// YAML frontmatter block carrying `name`. Runtimes like OpenCode silently drop
-// SKILL.md files whose frontmatter is missing or doesn't have a parseable
-// `name`, so we synthesize one from the sanitized directory slug (which
-// matches the parent folder) plus the DB description when content arrives
-// without frontmatter. Existing frontmatter is left untouched — the import
-// path may have shaped it deliberately to match a specific runtime, and we
-// don't want to clobber that.
+// ensureSkillFrontmatter returns SKILL.md content guaranteed to lead with a
+// YAML frontmatter block carrying a parseable, non-empty `name` key.
+//
+// Runtimes like OpenCode silently drop SKILL.md whose frontmatter is missing
+// or whose `name` doesn't parse, so we handle three cases:
+//
+//   - No frontmatter at all → synthesize one with `name: <slug>` (and the DB
+//     description when available).
+//   - Frontmatter present and already has a non-empty `name` → leave it
+//     untouched. The upstream import may have shaped that block deliberately
+//     to match a specific runtime, and we don't want to clobber it.
+//   - Frontmatter present but missing `name` (e.g. an upstream skill whose
+//     YAML only set `description`, with the directory slug filling in for
+//     `name` at import time) → prepend `name: <slug>` as the first key of
+//     the existing block so OpenCode can still route the skill.
 func ensureSkillFrontmatter(content, slug, description string) string {
-	if strings.HasPrefix(content, "---\n") || strings.HasPrefix(content, "---\r\n") {
+	fmStart, ok := frontmatterBodyStart(content)
+	if !ok {
+		var b strings.Builder
+		b.WriteString("---\n")
+		fmt.Fprintf(&b, "name: %s\n", slug)
+		if d := strings.TrimSpace(description); d != "" {
+			fmt.Fprintf(&b, "description: %s\n", yamlEscapeInline(d))
+		}
+		b.WriteString("---\n\n")
+		b.WriteString(content)
+		return b.String()
+	}
+	if hasFrontmatterName(content[fmStart:]) {
 		return content
 	}
-	var b strings.Builder
-	b.WriteString("---\n")
-	fmt.Fprintf(&b, "name: %s\n", slug)
-	if d := strings.TrimSpace(description); d != "" {
-		fmt.Fprintf(&b, "description: %s\n", yamlEscapeInline(d))
-	}
-	b.WriteString("---\n\n")
-	b.WriteString(content)
-	return b.String()
+	// Frontmatter exists but lacks a parseable `name`. Inject one as the
+	// first key of the existing block and keep the rest verbatim (including
+	// `description`, body, and any runtime-specific keys the import path
+	// preserved).
+	return content[:fmStart] + "name: " + slug + "\n" + content[fmStart:]
 }
 
-// yamlEscapeInline returns a YAML-safe inline scalar for the description
-// value. Newlines flatten to spaces (frontmatter is single-line per key here)
-// and embedded double-quotes are escaped. The result is wrapped in double
-// quotes only when the raw value contains characters that would otherwise
-// break a plain scalar (colon, quote, leading/trailing whitespace, etc.).
+// frontmatterBodyStart returns the byte offset where the YAML body begins
+// (just after the opening `---` line) and whether a valid opening delimiter
+// was found.
+func frontmatterBodyStart(content string) (int, bool) {
+	if strings.HasPrefix(content, "---\n") {
+		return 4, true
+	}
+	if strings.HasPrefix(content, "---\r\n") {
+		return 5, true
+	}
+	return 0, false
+}
+
+// hasFrontmatterName reports whether the frontmatter body (the slice starting
+// just after the opening `---` line) contains a parseable, non-empty `name:`
+// scalar before the closing `---`.
+func hasFrontmatterName(fmBody string) bool {
+	closeIdx := strings.Index(fmBody, "\n---")
+	if closeIdx < 0 {
+		// Missing close — scan everything we have and fall through. The
+		// frontmatter is malformed and OpenCode will reject it anyway, but
+		// detecting an existing name keeps us from layering a second one
+		// on top.
+		closeIdx = len(fmBody)
+	}
+	for _, line := range strings.Split(fmBody[:closeIdx], "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "name:") {
+			continue
+		}
+		v := strings.TrimSpace(strings.TrimPrefix(line, "name:"))
+		v = strings.Trim(v, `"'`)
+		if v != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// yamlEscapeInline returns a double-quoted YAML scalar that always parses as
+// a string. Plain scalars are deliberately avoided: values like `[foo]`,
+// `{x: y}`, `false`, `null`, or `2024-01-01` would parse as flow sequences,
+// flow mappings, booleans, nulls, or timestamps under YAML 1.2, and
+// OpenCode's frontmatter check rejects non-string descriptions outright. We
+// flatten newlines (frontmatter values are single-line per key) and escape
+// `\` and `"` so any input is a safe inline string.
 func yamlEscapeInline(s string) string {
 	flat := strings.ReplaceAll(s, "\r\n", " ")
 	flat = strings.ReplaceAll(flat, "\n", " ")
 	flat = strings.ReplaceAll(flat, "\r", " ")
-	needsQuote := strings.ContainsAny(flat, `:"'#&*!|>%@`+"`") || strings.HasPrefix(flat, " ") || strings.HasSuffix(flat, " ")
-	if !needsQuote {
-		return flat
-	}
 	escaped := strings.ReplaceAll(flat, `\`, `\\`)
 	escaped = strings.ReplaceAll(escaped, `"`, `\"`)
 	return `"` + escaped + `"`
