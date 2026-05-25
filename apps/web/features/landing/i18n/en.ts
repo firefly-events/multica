@@ -314,7 +314,6 @@ export function createEnDict(allowSignup: boolean): LandingDict {
         fixes: [
           "Issue timelines stay in chronological order when live comments and activity arrive close together",
           "Codex runs no longer inherit hidden host memory during Multica tasks, and Pi runs receive a cleaner end-of-input signal",
-          "Squad leaders are no longer woken again when an agent replies to a member's explicit routing mention",
           "Local runtime delete actions now avoid self-healing rows that would immediately reappear, and dependency updates close server security advisories",
           "Title fields now refresh safely after external updates, and markdown code no longer uses ligatures that can distort command flags",
         ],
