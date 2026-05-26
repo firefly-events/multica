@@ -1751,6 +1751,104 @@ func TestPrepareCodexHome_RefreshesStaleAuthCopyOnReuse(t *testing.T) {
 	}
 }
 
+// Regression for MUL-2646: when the user updates `~/.codex/config.toml`
+// between two task runs against the same per-task codex-home — e.g. to
+// rotate the active [model_providers.X] base_url or point env_key at a
+// new API key — the per-task copy must refresh from the shared source on
+// Reuse(). Without this, Codex keeps reading the old provider URL / env
+// var on session resume, so the agent hits the new endpoint with the old
+// key and the API rejects the token. Symmetric to issue #2081's fix for
+// the symlinked auth.json (covered above).
+func TestPrepareCodexHome_RefreshesStaleCopiedConfigOnReuse(t *testing.T) {
+	// Cannot use t.Parallel() with t.Setenv.
+
+	sharedHome := t.TempDir()
+	oldConfig := `model_provider = "old-provider"
+
+[model_providers.old-provider]
+name = "Old"
+base_url = "https://old.example.com"
+env_key = "OLD_API_KEY"
+`
+	if err := os.WriteFile(filepath.Join(sharedHome, "config.toml"), []byte(oldConfig), 0o644); err != nil {
+		t.Fatalf("seed shared config.toml: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(sharedHome, "config.json"), []byte(`{"model":"old-model"}`), 0o644); err != nil {
+		t.Fatalf("seed shared config.json: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(sharedHome, "instructions.md"), []byte("old instructions"), 0o644); err != nil {
+		t.Fatalf("seed shared instructions.md: %v", err)
+	}
+	t.Setenv("CODEX_HOME", sharedHome)
+
+	codexHome := filepath.Join(t.TempDir(), "codex-home")
+	if err := prepareCodexHome(codexHome, testLogger()); err != nil {
+		t.Fatalf("first prepareCodexHome: %v", err)
+	}
+
+	// User rotates provider + API key in the shared config between runs.
+	newConfig := `model_provider = "new-provider"
+
+[model_providers.new-provider]
+name = "New"
+base_url = "https://new.example.com"
+env_key = "NEW_API_KEY"
+`
+	if err := os.WriteFile(filepath.Join(sharedHome, "config.toml"), []byte(newConfig), 0o644); err != nil {
+		t.Fatalf("rotate shared config.toml: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(sharedHome, "config.json"), []byte(`{"model":"new-model"}`), 0o644); err != nil {
+		t.Fatalf("rotate shared config.json: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(sharedHome, "instructions.md"), []byte("new instructions"), 0o644); err != nil {
+		t.Fatalf("rotate shared instructions.md: %v", err)
+	}
+
+	// Resume path: same per-task codex-home, re-prepared.
+	if err := prepareCodexHome(codexHome, testLogger()); err != nil {
+		t.Fatalf("second prepareCodexHome (resume): %v", err)
+	}
+
+	// config.toml must reflect the new provider/URL/env_key.
+	data, err := os.ReadFile(filepath.Join(codexHome, "config.toml"))
+	if err != nil {
+		t.Fatalf("read per-task config.toml: %v", err)
+	}
+	s := string(data)
+	for _, want := range []string{`model_provider = "new-provider"`, "https://new.example.com", "NEW_API_KEY"} {
+		if !strings.Contains(s, want) {
+			t.Errorf("per-task config.toml missing %q after refresh, got:\n%s", want, s)
+		}
+	}
+	for _, bad := range []string{"old-provider", "https://old.example.com", "OLD_API_KEY"} {
+		if strings.Contains(s, bad) {
+			t.Errorf("per-task config.toml still contains stale %q after refresh, got:\n%s", bad, s)
+		}
+	}
+	// Daemon-managed sandbox block must be re-applied on top of the fresh copy.
+	if !strings.Contains(s, multicaManagedBeginMarker) {
+		t.Errorf("daemon-managed sandbox block missing after refresh, got:\n%s", s)
+	}
+
+	// config.json must reflect the new model.
+	data, err = os.ReadFile(filepath.Join(codexHome, "config.json"))
+	if err != nil {
+		t.Fatalf("read per-task config.json: %v", err)
+	}
+	if string(data) != `{"model":"new-model"}` {
+		t.Errorf("per-task config.json content = %q, want refreshed contents", data)
+	}
+
+	// instructions.md must reflect the new content.
+	data, err = os.ReadFile(filepath.Join(codexHome, "instructions.md"))
+	if err != nil {
+		t.Fatalf("read per-task instructions.md: %v", err)
+	}
+	if string(data) != "new instructions" {
+		t.Errorf("per-task instructions.md content = %q, want refreshed contents", data)
+	}
+}
+
 func TestEnsureCodexSandboxConfigCreatesDefaultLinux(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()

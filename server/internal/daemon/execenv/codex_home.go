@@ -272,15 +272,27 @@ func logCodexAuthState(authPath string, logger *slog.Logger) {
 // idempotently without touching user-managed keys.)
 
 // copyFileIfExists copies src to dst. If src doesn't exist, it's a no-op.
-// If dst already exists, it's not overwritten.
+// If dst already exists, it is refreshed from src so the per-task copy
+// tracks the current shared source across Reuse() runs.
+//
+// Regression for MUL-2646: the prior "don't overwrite" guard left
+// per-task config.toml / config.json / instructions.md stuck on whatever
+// snapshot they were seeded with at first Prepare. A user who edited
+// ~/.codex/config.toml between runs — e.g. switching the active
+// [model_providers.X] base_url, or pointing env_key at a freshly rotated
+// API key — kept hitting the stale per-task copy on session resume, with
+// Codex calling the new URL using the old key. The daemon-managed
+// sandbox / multi-agent / memory blocks are applied via marker-bracketed
+// idempotent passes after this copy, so refreshing here preserves them.
 func copyFileIfExists(src, dst string) error {
 	if _, err := os.Stat(src); os.IsNotExist(err) {
 		return nil
 	}
 
-	// Don't overwrite existing file.
-	if _, err := os.Stat(dst); err == nil {
-		return nil
+	if _, err := os.Lstat(dst); err == nil {
+		if err := os.Remove(dst); err != nil {
+			return fmt.Errorf("remove stale dst %s: %w", dst, err)
+		}
 	}
 
 	return copyFile(src, dst)
