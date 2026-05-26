@@ -78,6 +78,13 @@ var projectResourceAddCmd = &cobra.Command{
 	RunE:  runProjectResourceAdd,
 }
 
+var projectResourceUpdateCmd = &cobra.Command{
+	Use:   "update <project-id> <resource-id>",
+	Short: "Edit an attached resource (ref payload, label, or position)",
+	Args:  exactArgs(2),
+	RunE:  runProjectResourceUpdate,
+}
+
 var projectResourceRemoveCmd = &cobra.Command{
 	Use:   "remove <project-id> <resource-id>",
 	Short: "Detach a resource from a project",
@@ -100,6 +107,7 @@ func init() {
 
 	projectResourceCmd.AddCommand(projectResourceListCmd)
 	projectResourceCmd.AddCommand(projectResourceAddCmd)
+	projectResourceCmd.AddCommand(projectResourceUpdateCmd)
 	projectResourceCmd.AddCommand(projectResourceRemoveCmd)
 
 	// project list
@@ -135,6 +143,19 @@ func init() {
 	projectResourceAddCmd.Flags().String("ref", "", "Generic JSON resource_ref payload — overrides the per-type shortcuts when set")
 	projectResourceAddCmd.Flags().String("label", "", "Optional human-readable label")
 	projectResourceAddCmd.Flags().String("output", "json", "Output format: table or json")
+
+	// project resource update — mirrors `add` flags, but every field is
+	// optional so the caller can edit one thing at a time.
+	projectResourceUpdateCmd.Flags().String("url", "", "Shortcut: new repo URL (github_repo)")
+	projectResourceUpdateCmd.Flags().String("default-branch-hint", "", "Shortcut: new default branch hint (github_repo)")
+	projectResourceUpdateCmd.Flags().String("local-path", "", "Shortcut: new absolute local path (local_directory)")
+	projectResourceUpdateCmd.Flags().String("daemon-id", "", "Shortcut: new daemon id (local_directory)")
+	projectResourceUpdateCmd.Flags().String("ref-label", "", "Shortcut: new label embedded in resource_ref (local_directory)")
+	projectResourceUpdateCmd.Flags().String("ref", "", "Generic JSON resource_ref payload — overrides per-type shortcuts when set")
+	projectResourceUpdateCmd.Flags().String("label", "", "New human-readable label; pass an empty string to clear")
+	projectResourceUpdateCmd.Flags().Bool("clear-label", false, "Clear the human-readable label")
+	projectResourceUpdateCmd.Flags().Int32("position", 0, "New display position")
+	projectResourceUpdateCmd.Flags().String("output", "json", "Output format: table or json")
 
 	// project resource remove
 	projectResourceRemoveCmd.Flags().String("output", "table", "Output format: table or json")
@@ -599,6 +620,169 @@ func runProjectResourceAdd(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 	return cli.PrintJSON(os.Stdout, result)
+}
+
+func runProjectResourceUpdate(cmd *cobra.Command, args []string) error {
+	client, err := newAPIClient(cmd)
+	if err != nil {
+		return err
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	projectRef, err := resolveProjectID(ctx, client, args[0])
+	if err != nil {
+		return fmt.Errorf("resolve project: %w", err)
+	}
+	resourceRef, err := resolveProjectResourceID(ctx, client, projectRef.ID, args[1])
+	if err != nil {
+		return fmt.Errorf("resolve project resource: %w", err)
+	}
+
+	// Fetch the existing row so per-type shortcuts know which schema to
+	// emit. The server still validates, but doing the dispatch here means
+	// the user gets a clear "what does --url do here?" error before we
+	// round-trip.
+	var existing map[string]any
+	if err := client.GetJSON(ctx, "/api/projects/"+projectRef.ID+"/resources", &existing); err != nil {
+		return fmt.Errorf("list project resources: %w", err)
+	}
+	var resourceType string
+	if list, ok := existing["resources"].([]any); ok {
+		for _, raw := range list {
+			row, ok := raw.(map[string]any)
+			if !ok {
+				continue
+			}
+			if strVal(row, "id") == resourceRef.ID {
+				resourceType = strVal(row, "resource_type")
+				break
+			}
+		}
+	}
+
+	body := map[string]any{}
+
+	if rawRef, _ := cmd.Flags().GetString("ref"); strings.TrimSpace(rawRef) != "" {
+		var ref any
+		if err := json.Unmarshal([]byte(rawRef), &ref); err != nil {
+			return fmt.Errorf("--ref is not valid JSON: %w", err)
+		}
+		body["resource_ref"] = ref
+	} else {
+		ref, has, err := buildResourceRefFromFlags(cmd, resourceType)
+		if err != nil {
+			return err
+		}
+		if has {
+			body["resource_ref"] = ref
+		}
+	}
+
+	clearLabel, _ := cmd.Flags().GetBool("clear-label")
+	if clearLabel {
+		body["label"] = nil
+	} else if cmd.Flags().Changed("label") {
+		label, _ := cmd.Flags().GetString("label")
+		body["label"] = label
+	}
+
+	if cmd.Flags().Changed("position") {
+		pos, _ := cmd.Flags().GetInt32("position")
+		body["position"] = pos
+	}
+
+	if len(body) == 0 {
+		return fmt.Errorf("nothing to update — pass --ref / --url / --local-path / --label / --position / --clear-label")
+	}
+
+	var result map[string]any
+	if err := client.PutJSON(ctx, "/api/projects/"+projectRef.ID+"/resources/"+resourceRef.ID, body, &result); err != nil {
+		return fmt.Errorf("update project resource: %w", err)
+	}
+
+	output, _ := cmd.Flags().GetString("output")
+	if output == "table" {
+		headers := []string{"ID", "TYPE", "REF", "LABEL"}
+		rows := [][]string{{
+			strVal(result, "id"),
+			strVal(result, "resource_type"),
+			summarizeResourceRef(result["resource_ref"]),
+			strVal(result, "label"),
+		}}
+		cli.PrintTable(os.Stdout, headers, rows)
+		return nil
+	}
+	return cli.PrintJSON(os.Stdout, result)
+}
+
+// buildResourceRefFromFlags collects the per-type shortcut flags into a
+// resource_ref payload. Returns (ref, true) only when the caller actually set
+// at least one shortcut flag — that lets the update command tell "no change
+// requested" apart from "change ref to empty object". For local_directory we
+// only emit a partial ref when every required field is present so the server
+// never sees a half-built `{daemon_id: …}` payload.
+func buildResourceRefFromFlags(cmd *cobra.Command, resourceType string) (map[string]any, bool, error) {
+	switch resourceType {
+	case "github_repo":
+		urlSet := cmd.Flags().Changed("url")
+		hintSet := cmd.Flags().Changed("default-branch-hint")
+		if !urlSet && !hintSet {
+			return nil, false, nil
+		}
+		ref := map[string]any{}
+		if urlSet {
+			urlVal, _ := cmd.Flags().GetString("url")
+			urlVal = strings.TrimSpace(urlVal)
+			if urlVal == "" {
+				return nil, false, fmt.Errorf("--url cannot be empty")
+			}
+			ref["url"] = urlVal
+		}
+		if hintSet {
+			hint, _ := cmd.Flags().GetString("default-branch-hint")
+			ref["default_branch_hint"] = strings.TrimSpace(hint)
+		}
+		return ref, true, nil
+	case "local_directory":
+		pathSet := cmd.Flags().Changed("local-path")
+		daemonSet := cmd.Flags().Changed("daemon-id")
+		labelSet := cmd.Flags().Changed("ref-label")
+		if !pathSet && !daemonSet && !labelSet {
+			return nil, false, nil
+		}
+		ref := map[string]any{}
+		if pathSet {
+			pathVal, _ := cmd.Flags().GetString("local-path")
+			ref["local_path"] = strings.TrimSpace(pathVal)
+		}
+		if daemonSet {
+			daemonVal, _ := cmd.Flags().GetString("daemon-id")
+			ref["daemon_id"] = strings.TrimSpace(daemonVal)
+		}
+		if labelSet {
+			refLabel, _ := cmd.Flags().GetString("ref-label")
+			ref["label"] = strings.TrimSpace(refLabel)
+		}
+		// The ref must remain self-contained — partial updates would
+		// drop required fields server-side. Refuse early.
+		if _, ok := ref["local_path"]; !ok || !pathSet || strings.TrimSpace(ref["local_path"].(string)) == "" {
+			return nil, false, fmt.Errorf("local_directory --ref edits require --local-path (and --daemon-id)")
+		}
+		if _, ok := ref["daemon_id"]; !ok || !daemonSet || strings.TrimSpace(ref["daemon_id"].(string)) == "" {
+			return nil, false, fmt.Errorf("local_directory --ref edits require --daemon-id (and --local-path)")
+		}
+		return ref, true, nil
+	default:
+		// Unknown type or empty (resource not found) — caller must use --ref.
+		if cmd.Flags().Changed("url") || cmd.Flags().Changed("default-branch-hint") ||
+			cmd.Flags().Changed("local-path") || cmd.Flags().Changed("daemon-id") ||
+			cmd.Flags().Changed("ref-label") {
+			return nil, false, fmt.Errorf("no built-in shortcut for resource type %q; pass the full payload via --ref '<json>'", resourceType)
+		}
+		return nil, false, nil
+	}
 }
 
 func runProjectResourceRemove(cmd *cobra.Command, args []string) error {
