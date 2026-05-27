@@ -295,17 +295,15 @@ export function createEnDict(allowSignup: boolean): LandingDict {
       {
         version: "0.3.10",
         date: "2026-05-27",
-        title: "Local Projects, Smarter Autopilots & Better Comments",
+        title: "Local Working Directories",
         changes: [],
         features: [
           "Projects can now use a local working directory on Desktop, so tasks can run in an existing folder while Multica shows when another task is waiting for that directory",
           "Autopilot webhook triggers can now filter incoming events and actions before work starts, with docs linked directly from the setup flow",
           "Swimlane views can group Issues by parent Issue, project, or assignee, making large boards easier to slice by how the team plans work",
           "Comments now support selecting multiple attachments and keeping, removing, or replacing attachments while editing",
-          "Cloud node authentication now recognizes Multica Cloud-issued node tokens, making managed runtime connections safer",
         ],
         improvements: [
-          "Local-directory project setup is now covered in English and Chinese docs, including when it writes directly into the user's folder",
           "Chinese product copy is more consistent across navigation, settings, search, and runtime screens",
           "The frontend codebase received accessibility and React cleanup across common screens, and mobile checks now run only when mobile code changes",
           "CLI list output is cleaner for automated readers, and squad lists now show member counts when available",
