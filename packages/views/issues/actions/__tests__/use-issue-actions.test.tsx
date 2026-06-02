@@ -58,15 +58,27 @@ vi.mock("@multica/core/paths", async () => {
   };
 });
 
+// Mutable so individual tests can flip the current path and toggle the
+// desktop-only `openInNewTab` capability (absent on the web adapter).
+const navMock: {
+  push: ReturnType<typeof vi.fn>;
+  pathname: string;
+  searchParams: URLSearchParams;
+  back: ReturnType<typeof vi.fn>;
+  replace: ReturnType<typeof vi.fn>;
+  getShareableUrl: (p: string) => string;
+  openInNewTab?: ReturnType<typeof vi.fn>;
+} = {
+  push: vi.fn(),
+  pathname: "/test/issues/issue-1",
+  searchParams: new URLSearchParams(),
+  back: vi.fn(),
+  replace: vi.fn(),
+  getShareableUrl: (p: string) => `https://app.multica.com${p}`,
+  openInNewTab: undefined,
+};
 vi.mock("../../../navigation", () => ({
-  useNavigation: () => ({
-    push: vi.fn(),
-    pathname: "/test/issues/issue-1",
-    searchParams: new URLSearchParams(),
-    back: vi.fn(),
-    replace: vi.fn(),
-    getShareableUrl: (p: string) => `https://app.multica.com${p}`,
-  }),
+  useNavigation: () => navMock,
 }));
 
 vi.mock("sonner", () => ({
@@ -111,11 +123,22 @@ beforeEach(() => {
   mockDeletePinMutate.mockReset();
   pinListRef.value = [];
   localStorage.clear();
+  navMock.push.mockReset();
+  navMock.pathname = "/test/issues/issue-1";
+  navMock.openInNewTab = undefined;
+  delete (window as unknown as { desktopAPI?: unknown }).desktopAPI;
   Object.defineProperty(navigator, "clipboard", {
     configurable: true,
     value: { writeText: vi.fn().mockResolvedValue(undefined) },
   });
 });
+
+/** Stub the preload bridge so `isDesktopShell()` returns true. */
+function enterDesktopShell() {
+  (window as unknown as { desktopAPI?: unknown }).desktopAPI = {
+    pickDirectory: vi.fn(),
+  };
+}
 
 describe("useIssueActions", () => {
   it("updateField dispatches useUpdateIssue.mutate with the correct payload", () => {
@@ -239,6 +262,48 @@ describe("useIssueActions", () => {
       itemId: "issue-1",
     });
     expect(mockCreatePinMutate).not.toHaveBeenCalled();
+  });
+
+  it("canOpenInNewTab is false on web (no desktop shell, no adapter method)", () => {
+    const { result } = renderHook(() => useIssueActions(mockIssue), { wrapper });
+    expect(result.current.canOpenInNewTab).toBe(false);
+  });
+
+  it("canOpenInNewTab is false on desktop when the issue is already the active tab", () => {
+    enterDesktopShell();
+    navMock.openInNewTab = vi.fn();
+    navMock.pathname = "/test/issues/issue-1"; // === paths.issueDetail("issue-1")
+    const { result } = renderHook(() => useIssueActions(mockIssue), { wrapper });
+    expect(result.current.canOpenInNewTab).toBe(false);
+  });
+
+  it("canOpenInNewTab is true on desktop from a different path (e.g. a list row)", () => {
+    enterDesktopShell();
+    navMock.openInNewTab = vi.fn();
+    navMock.pathname = "/test/issues";
+    const { result } = renderHook(() => useIssueActions(mockIssue), { wrapper });
+    expect(result.current.canOpenInNewTab).toBe(true);
+  });
+
+  it("openInNewTab opens the issue path in a foreground tab", () => {
+    navMock.openInNewTab = vi.fn();
+    const { result } = renderHook(() => useIssueActions(mockIssue), { wrapper });
+
+    act(() => {
+      result.current.openInNewTab();
+    });
+
+    expect(navMock.openInNewTab).toHaveBeenCalledWith(
+      "/test/issues/issue-1",
+      undefined,
+      { activate: true },
+    );
+  });
+
+  it("openInNewTab is a safe no-op when the adapter lacks the capability (web)", () => {
+    navMock.openInNewTab = undefined;
+    const { result } = renderHook(() => useIssueActions(mockIssue), { wrapper });
+    expect(() => act(() => result.current.openInNewTab())).not.toThrow();
   });
 
   it("is a safe no-op when issue is null", () => {

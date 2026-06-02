@@ -389,6 +389,7 @@
     "unassigned": "Unassigned",
     "pin_to_sidebar": "Pin to sidebar",
     "unpin_from_sidebar": "Unpin from sidebar",
+    "open_in_new_tab": "Open in new tab",
     "copy_link": "Copy link",
     "copy_workdir_path": "Copy local workdir path",
     "more": "More",

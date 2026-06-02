@@ -378,6 +378,7 @@
     "unassigned": "未分配",
     "pin_to_sidebar": "固定到侧边栏",
     "unpin_from_sidebar": "从侧边栏取消固定",
+    "open_in_new_tab": "在新标签页打开",
     "copy_link": "复制链接",
     "copy_workdir_path": "复制本地 workdir 路径",
     "more": "更多",

@@ -389,6 +389,7 @@
     "unassigned": "담당자 없음",
     "pin_to_sidebar": "사이드바에 고정",
     "unpin_from_sidebar": "사이드바 고정 해제",
+    "open_in_new_tab": "새 탭에서 열기",
     "copy_link": "링크 복사",
     "copy_workdir_path": "로컬 작업 디렉터리 경로 복사",
     "more": "더 보기",

@@ -11,6 +11,7 @@ import { useModalStore } from "@multica/core/modals";
 import { useUpdateIssue } from "@multica/core/issues/mutations";
 import { pinListOptions, useCreatePin, useDeletePin } from "@multica/core/pins";
 import { useNavigation } from "../../navigation";
+import { isDesktopShell } from "../../platform";
 import { useT } from "../../i18n";
 
 const BACKLOG_HINT_LS_KEY = "multica:backlog-agent-hint-dismissed";
@@ -20,6 +21,12 @@ export interface UseIssueActionsResult {
   updateField: (updates: Partial<UpdateIssueRequest>) => void;
   togglePin: () => void;
   copyLink: () => Promise<void>;
+  /** Desktop-only: open this issue in a new tab (foreground). */
+  openInNewTab: () => void;
+  /** Whether the "Open in new tab" item should render — desktop shell only,
+   *  and hidden when the issue is already the active tab (target === current
+   *  path), so the detail kebab never offers a no-op while list rows still do. */
+  canOpenInNewTab: boolean;
   openCreateSubIssue: () => void;
   openSetParent: () => void;
   openAddChild: () => void;
@@ -109,6 +116,24 @@ export function useIssueActions(issue: Issue | null): UseIssueActionsResult {
     }
   }, [paths, issueId, navigation, t]);
 
+  const openInNewTab = useCallback(() => {
+    if (!issueId) return;
+    navigation.openInNewTab?.(paths.issueDetail(issueId), undefined, {
+      activate: true,
+    });
+  }, [issueId, navigation, paths]);
+
+  // Desktop-only. `openInNewTab` is absent on the web adapter, and we hide the
+  // item when the target path equals the current path so the issue's own detail
+  // kebab doesn't surface a self-referential no-op (openTab would just refocus
+  // the current tab). List-row context menus sit on a different path, so they
+  // keep showing it.
+  const canOpenInNewTab =
+    !!issueId &&
+    isDesktopShell() &&
+    !!navigation.openInNewTab &&
+    navigation.pathname !== paths.issueDetail(issueId);
+
   const openCreateSubIssue = useCallback(() => {
     if (!issueId) return;
     openModal("create-issue", {
@@ -145,6 +170,8 @@ export function useIssueActions(issue: Issue | null): UseIssueActionsResult {
     updateField,
     togglePin,
     copyLink,
+    openInNewTab,
+    canOpenInNewTab,
     openCreateSubIssue,
     openSetParent,
     openAddChild,

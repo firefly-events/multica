@@ -86,14 +86,25 @@ vi.mock("@multica/core/paths", async () => {
   };
 });
 
+// Mutable so individual tests can simulate the desktop shell (current path +
+// the desktop-only `openInNewTab` adapter method) for the "Open in new tab" item.
+const navMock: {
+  push: ReturnType<typeof vi.fn>;
+  pathname: string;
+  searchParams: URLSearchParams;
+  back: ReturnType<typeof vi.fn>;
+  replace: ReturnType<typeof vi.fn>;
+  openInNewTab?: ReturnType<typeof vi.fn>;
+} = {
+  push: vi.fn(),
+  pathname: "/test/issues/issue-1",
+  searchParams: new URLSearchParams(),
+  back: vi.fn(),
+  replace: vi.fn(),
+  openInNewTab: undefined,
+};
 vi.mock("../../../navigation", () => ({
-  useNavigation: () => ({
-    push: vi.fn(),
-    pathname: "/test/issues/issue-1",
-    searchParams: new URLSearchParams(),
-    back: vi.fn(),
-    replace: vi.fn(),
-  }),
+  useNavigation: () => navMock,
 }));
 
 vi.mock("sonner", () => ({
@@ -142,7 +153,18 @@ function wrap(ui: React.ReactNode) {
 
 beforeEach(() => {
   mockOpenModal.mockReset();
+  navMock.push.mockReset();
+  navMock.pathname = "/test/issues/issue-1";
+  navMock.openInNewTab = undefined;
+  delete (window as unknown as { desktopAPI?: unknown }).desktopAPI;
 });
+
+/** Stub the preload bridge so `isDesktopShell()` returns true. */
+function enterDesktopShell() {
+  (window as unknown as { desktopAPI?: unknown }).desktopAPI = {
+    pickDirectory: vi.fn(),
+  };
+}
 
 describe("IssueActionsDropdown", () => {
   it("renders the top-level items when the trigger is clicked", async () => {
@@ -165,10 +187,53 @@ describe("IssueActionsDropdown", () => {
     expect(screen.getByText("Copy link")).toBeInTheDocument();
     expect(screen.getByText("More")).toBeInTheDocument();
     expect(screen.getByText("Delete issue")).toBeInTheDocument();
+    // "Open in new tab" is desktop-only; absent on web / outside the shell.
+    expect(screen.queryByText("Open in new tab")).not.toBeInTheDocument();
     // Relationship actions are hidden inside the "More" submenu by default.
     expect(screen.queryByText("Create sub-issue")).not.toBeInTheDocument();
     expect(screen.queryByText("Set parent issue...")).not.toBeInTheDocument();
     expect(screen.queryByText("Add sub-issue...")).not.toBeInTheDocument();
+  });
+
+  it("shows 'Open in new tab' on desktop from a different path and opens a foreground tab", async () => {
+    enterDesktopShell();
+    navMock.openInNewTab = vi.fn();
+    navMock.pathname = "/test/issues"; // list view, not this issue's own tab
+    render(
+      wrap(
+        <IssueActionsDropdown
+          issue={mockIssue}
+          trigger={<button data-testid="trigger">Menu</button>}
+        />,
+      ),
+    );
+
+    fireEvent.click(screen.getByTestId("trigger"));
+    fireEvent.click(await screen.findByText("Open in new tab"));
+
+    expect(navMock.openInNewTab).toHaveBeenCalledWith(
+      "/test/issues/issue-1",
+      undefined,
+      { activate: true },
+    );
+  });
+
+  it("hides 'Open in new tab' on the issue's own detail tab (target === current path)", async () => {
+    enterDesktopShell();
+    navMock.openInNewTab = vi.fn();
+    navMock.pathname = "/test/issues/issue-1";
+    render(
+      wrap(
+        <IssueActionsDropdown
+          issue={mockIssue}
+          trigger={<button data-testid="trigger">Menu</button>}
+        />,
+      ),
+    );
+
+    fireEvent.click(screen.getByTestId("trigger"));
+    await screen.findByText("Copy link");
+    expect(screen.queryByText("Open in new tab")).not.toBeInTheDocument();
   });
 
   it("clicking the Assignee item opens the shared AssigneePicker popover", async () => {

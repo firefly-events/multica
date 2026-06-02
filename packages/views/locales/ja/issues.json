@@ -373,6 +373,7 @@
     "unassigned": "未割り当て",
     "pin_to_sidebar": "サイドバーにピン留め",
     "unpin_from_sidebar": "サイドバーのピン留めを解除",
+    "open_in_new_tab": "新しいタブで開く",
     "copy_link": "リンクをコピー",
     "copy_workdir_path": "ローカルの作業ディレクトリのパスをコピー",
     "more": "その他",
