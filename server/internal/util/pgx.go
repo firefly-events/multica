@@ -92,6 +92,32 @@ func TimestampToPtr(t pgtype.Timestamptz) *string {
 	return &s
 }
 
+// DateToPtr formats a pgtype.Date as a date-only "YYYY-MM-DD" string, or nil
+// when unset. Issue start_date/due_date are calendar days with no time-of-day
+// or timezone, so they must never be rendered through an instant.
+func DateToPtr(d pgtype.Date) *string {
+	if !d.Valid {
+		return nil
+	}
+	s := d.Time.Format(time.DateOnly)
+	return &s
+}
+
+// ParseCalendarDate parses a calendar day from a "YYYY-MM-DD" string into a
+// pgtype.Date. For backward compatibility with older clients that still send an
+// RFC3339 timestamp, it falls back to parsing that and truncating to the UTC
+// date. The result carries no time-of-day or timezone.
+func ParseCalendarDate(s string) (pgtype.Date, error) {
+	if t, err := time.Parse(time.DateOnly, s); err == nil {
+		return pgtype.Date{Time: t, Valid: true}, nil
+	}
+	if t, err := time.Parse(time.RFC3339, s); err == nil {
+		y, m, d := t.UTC().Date()
+		return pgtype.Date{Time: time.Date(y, m, d, 0, 0, 0, 0, time.UTC), Valid: true}, nil
+	}
+	return pgtype.Date{}, fmt.Errorf("invalid date %q: expected YYYY-MM-DD", s)
+}
+
 func UUIDToPtr(u pgtype.UUID) *string {
 	if !u.Valid {
 		return nil
