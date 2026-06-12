@@ -270,7 +270,7 @@ export function createKoDict(allowSignup: boolean): LandingDict {
         {
           version: "0.3.21",
           date: "2026-06-12",
-          title: "CodeBuddy 에이전트, 더 안정적인 채팅, 더 쉬운 Issue 생성",
+          title: "CodeBuddy Runtime",
           changes: [],
           features: [
             "CodeBuddy로 로컬 Multica 에이전트를 실행할 수 있으며, 사용할 수 있는 모델과 실행 강도 선택지가 자동으로 표시됩니다.",
@@ -279,7 +279,6 @@ export function createKoDict(allowSignup: boolean): LandingDict {
           improvements: [
             "스킬 가져오기 충돌이 더 이해하기 쉬워졌습니다. 잠긴 스킬은 내부 ID 대신 멤버 이름을 보여주고, 단일 덮어쓰기도 한 번의 클릭으로 끝납니다.",
             "데스크톱 복구 안내가 먼저 무슨 일이 있었는지 설명하고, 멈춘 창을 신고할 때 포함할 정보를 더 명확하게 보여줍니다.",
-            "데몬 디스크 사용량에서 선택한 설정에 작업 기록이 없으면 다른 로컬 설정에 기록이 있을 수 있음을 알려줍니다.",
             "가입 시간으로 멤버를 정렬하거나 필터링하는 화면이 더 빠르게 로드될 수 있습니다.",
           ],
           fixes: [

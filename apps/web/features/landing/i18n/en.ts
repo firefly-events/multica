@@ -295,7 +295,7 @@ export function createEnDict(allowSignup: boolean): LandingDict {
       {
         version: "0.3.21",
         date: "2026-06-12",
-        title: "CodeBuddy Agents, Safer Chat, and Smoother Issue Creation",
+        title: "CodeBuddy Runtime",
         changes: [],
         features: [
           "CodeBuddy can now run local Multica agents, with its available model and effort choices shown automatically",
@@ -304,7 +304,6 @@ export function createEnDict(allowSignup: boolean): LandingDict {
         improvements: [
           "Skill import conflicts are clearer: locked skills show a person's name instead of an internal ID, and a single overwrite now completes in one click",
           "Desktop recovery prompts now explain what happened first and give clearer details to include when reporting a stuck window",
-          "Daemon disk usage now points you to other local profiles when the selected profile has no task history",
           "Views that sort or filter people by signup time can now load faster",
         ],
         fixes: [

@@ -295,7 +295,7 @@ export function createZhDict(allowSignup: boolean): LandingDict {
       {
         version: "0.3.21",
         date: "2026-06-12",
-        title: "CodeBuddy 智能体、更稳的聊天和更顺手的 Issue 创建",
+        title: "CodeBuddy Runtime",
         changes: [],
         features: [
           "CodeBuddy 现在可以驱动本地 Multica 智能体，并会自动显示可用的模型和投入强度选项",
@@ -304,7 +304,6 @@ export function createZhDict(allowSignup: boolean): LandingDict {
         improvements: [
           "技能导入冲突更容易理解：锁定的技能会显示成员名称，不再显示内部 ID；单个覆盖也可以一键完成",
           "桌面端恢复提示会先说明发生了什么，并给出更清楚的窗口卡住反馈信息",
-          "守护进程磁盘占用在当前配置没有任务记录时，会提示其他本地配置里可能有记录",
           "按注册时间排序或筛选成员的页面现在加载更快",
         ],
         fixes: [

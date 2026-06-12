@@ -271,8 +271,7 @@ export function createJaDict(allowSignup: boolean): LandingDict {
         {
           version: "0.3.21",
           date: "2026-06-12",
-          title:
-            "CodeBuddy エージェント、より安全なチャット、スムーズな Issue 作成",
+          title: "CodeBuddy Runtime",
           changes: [],
           features: [
             "CodeBuddy でローカルの Multica エージェントを動かせるようになり、利用できるモデルと実行の強さが自動で表示されます。",
@@ -281,7 +280,6 @@ export function createJaDict(allowSignup: boolean): LandingDict {
           improvements: [
             "スキル取り込みの競合が分かりやすくなり、ロックされたスキルには内部 ID ではなくメンバー名が表示され、単体の上書きも 1 クリックで完了します。",
             "デスクトップの復旧案内は、まず何が起きたかを説明し、固まったウィンドウを報告するときに含める情報も分かりやすくなりました。",
-            "デーモンのディスク使用量で選択中の設定にタスク履歴がない場合、他のローカル設定に履歴がある可能性を案内します。",
             "登録日時でメンバーを並べ替えたり絞り込んだりする画面が、より速く読み込まれるようになりました。",
           ],
           fixes: [
