@@ -23,10 +23,9 @@ import (
 	"github.com/multica-ai/multica/server/internal/events"
 	"github.com/multica-ai/multica/server/internal/featureflagdispatch"
 	"github.com/multica-ai/multica/server/internal/handler"
-	"github.com/multica-ai/multica/server/internal/integrations/channel"
-	"github.com/multica-ai/multica/server/internal/integrations/channel/engine"
+	"github.com/multica-ai/multica/server/internal/hive"
 	"github.com/multica-ai/multica/server/internal/integrations/lark"
-	"github.com/multica-ai/multica/server/internal/integrations/slack"
+
 	obsmetrics "github.com/multica-ai/multica/server/internal/metrics"
 	"github.com/multica-ai/multica/server/internal/middleware"
 	"github.com/multica-ai/multica/server/internal/realtime"
@@ -128,6 +127,8 @@ type RouterOptions struct {
 	// BatchedHeartbeatScheduler here so the caller can also drive Run/Stop;
 	// tests leave this nil and get the legacy synchronous behavior.
 	HeartbeatScheduler handler.HeartbeatScheduler
+	// HiveStore, when non-nil, enables the /api/plugins/hive routes.
+	HiveStore *hive.Store
 }
 
 // NewRouterWithOptions builds the fully-configured Chi router and
@@ -1149,6 +1150,11 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 				r.Put("/", h.UpdateNotificationPreferences)
 			})
 		})
+
+		// Hive plugin routes — build-linked, inherit auth from this group.
+		if opts.HiveStore != nil {
+			r.Mount("/api/plugins/hive", hive.Router(opts.HiveStore))
+		}
 	})
 
 	return r, h

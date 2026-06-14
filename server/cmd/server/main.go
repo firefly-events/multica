@@ -17,6 +17,7 @@ import (
 	"github.com/multica-ai/multica/server/internal/daemonws"
 	"github.com/multica-ai/multica/server/internal/events"
 	"github.com/multica-ai/multica/server/internal/handler"
+	"github.com/multica-ai/multica/server/internal/hive"
 	"github.com/multica-ai/multica/server/internal/logger"
 	obsmetrics "github.com/multica-ai/multica/server/internal/metrics"
 	"github.com/multica-ai/multica/server/internal/realtime"
@@ -185,6 +186,16 @@ func main() {
 	slog.Info("connected to database")
 	logPoolConfig(pool)
 
+	// Run Hive schema migrations — fail fast so the server never starts with
+	// a stale or missing hive schema. This is separate from the core
+	// public.schema_migrations ledger and the cmd/migrate binary.
+	if err := hive.RunMigrations(ctx, pool); err != nil {
+		slog.Error("hive migrations failed", "error", err)
+		os.Exit(1)
+	}
+	slog.Info("hive migrations ok")
+	hiveStore := hive.NewStore(pool)
+
 	bus := events.New()
 	hub := realtime.NewHub()
 	go hub.Run()
@@ -343,6 +354,7 @@ func main() {
 		DaemonWakeup:       daemonWakeup,
 		FeatureFlags:       flags,
 		HeartbeatScheduler: heartbeatScheduler,
+		HiveStore:          hiveStore,
 	})
 
 	srv := &http.Server{
