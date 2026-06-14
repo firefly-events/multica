@@ -93,3 +93,84 @@ func TestEpicNodeRoundTrip(t *testing.T) {
 	// Cleanup
 	_, _ = pool.Exec(ctx, `DELETE FROM hive.epic_nodes WHERE id = $1::uuid`, created.ID)
 }
+
+func TestReviewGateRoundTrip(t *testing.T) {
+	pool := testPool(t)
+	ctx := context.Background()
+
+	if err := hive.RunMigrations(ctx, pool); err != nil {
+		t.Fatalf("RunMigrations: %v", err)
+	}
+
+	store := hive.NewStore(pool)
+
+	const workspaceID = "00000000-0000-0000-0000-000000000002"
+	const epicID = "test-epic-gates"
+	const gateKey = "design-review"
+
+	// Create
+	created, err := store.CreateReviewGate(ctx, workspaceID, epicID, gateKey, "pending", "agent-1", []byte(`{"note":"initial"}`))
+	if err != nil {
+		t.Fatalf("CreateReviewGate: %v", err)
+	}
+	if created.ID == "" {
+		t.Fatal("CreateReviewGate: empty ID returned")
+	}
+	if created.State != "pending" {
+		t.Errorf("State: got %q want %q", created.State, "pending")
+	}
+
+	// List
+	gates, err := store.ListReviewGates(ctx, workspaceID, epicID)
+	if err != nil {
+		t.Fatalf("ListReviewGates: %v", err)
+	}
+	if len(gates) == 0 {
+		t.Fatal("ListReviewGates: expected at least one gate")
+	}
+	found := false
+	for _, g := range gates {
+		if g.ID == created.ID {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("ListReviewGates: created gate %q not in results", created.ID)
+	}
+
+	// Get
+	fetched, err := store.GetReviewGate(ctx, created.ID)
+	if err != nil {
+		t.Fatalf("GetReviewGate: %v", err)
+	}
+	if fetched.GateKey != gateKey {
+		t.Errorf("GateKey: got %q want %q", fetched.GateKey, gateKey)
+	}
+
+	// Update
+	updated, err := store.UpdateReviewGate(ctx, created.ID, "approved", "agent-2", []byte(`{"note":"lgtm"}`))
+	if err != nil {
+		t.Fatalf("UpdateReviewGate: %v", err)
+	}
+	if updated.State != "approved" {
+		t.Errorf("updated State: got %q want %q", updated.State, "approved")
+	}
+	if updated.UpdatedBy != "agent-2" {
+		t.Errorf("UpdatedBy: got %q want %q", updated.UpdatedBy, "agent-2")
+	}
+
+	// Upsert idempotency
+	upserted, err := store.CreateReviewGate(ctx, workspaceID, epicID, gateKey, "rejected", "agent-3", nil)
+	if err != nil {
+		t.Fatalf("CreateReviewGate upsert: %v", err)
+	}
+	if upserted.ID != created.ID {
+		t.Errorf("upsert should return same row: got %q want %q", upserted.ID, created.ID)
+	}
+	if upserted.State != "rejected" {
+		t.Errorf("upserted State: got %q want %q", upserted.State, "rejected")
+	}
+
+	// Cleanup
+	_, _ = pool.Exec(ctx, `DELETE FROM hive.review_gates WHERE workspace_id = $1::uuid AND epic_id = $2`, workspaceID, epicID)
+}

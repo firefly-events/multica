@@ -113,6 +113,7 @@ vi.mock("@multica/core/paths", () => ({
     skills: () => "/acme/skills",
     settings: () => "/acme/settings",
     hiveEpics: () => "/acme/hive/epics",
+    hiveReviewGates: () => "/acme/hive/review-gates",
     issueDetail: (id: string) => `/acme/issues/${id}`,
     projectDetail: (id: string) => `/acme/projects/${id}`,
   }),

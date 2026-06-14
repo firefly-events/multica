@@ -38,6 +38,7 @@ function workspaceScoped(slug: string) {
     skillDetail: (id: string) => `${ws}/skills/${encode(id)}`,
     settings: () => `${ws}/settings`,
     hiveEpics: () => `${ws}/hive/epics`,
+    hiveReviewGates: () => `${ws}/hive/review-gates`,
     attachmentPreview: (id: string) => `${ws}/attachments/${encode(id)}/preview`,
   };
 }

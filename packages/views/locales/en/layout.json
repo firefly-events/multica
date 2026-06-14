@@ -11,7 +11,8 @@
     "runtimes": "Runtimes",
     "skills": "Skills",
     "settings": "Settings",
-    "epics": "Epics"
+    "epics": "Epics",
+    "review_gates": "Review Gates"
   },
   "help": {
     "trigger": "Help",

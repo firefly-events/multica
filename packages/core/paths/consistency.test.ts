@@ -30,6 +30,7 @@ describe("paths.workspace() shape", () => {
         "squads",
         "settings",
         "hiveEpics",
+        "hiveReviewGates",
       ]),
     );
   });
@@ -52,6 +53,7 @@ describe("paths.workspace() shape", () => {
       ["squads", "squads"],
       ["settings", "settings"],
       ["hiveEpics", "hive/epics"],
+      ["hiveReviewGates", "hive/review-gates"],
     ];
     const wsAsAny = ws as unknown as Record<string, () => string>;
     for (const [method, segment] of expectedSegments) {
