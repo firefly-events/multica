@@ -13,7 +13,8 @@
     "settings": "Settings",
     "epics": "Epics",
     "review_gates": "Review Gates",
-    "my_queue": "My Queue"
+    "my_queue": "My Queue",
+    "hermes": "Hermes"
   },
   "help": {
     "trigger": "Help",

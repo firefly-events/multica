@@ -40,6 +40,7 @@ function workspaceScoped(slug: string) {
     hiveEpics: () => `${ws}/hive/epics`,
     hiveReviewGates: () => `${ws}/hive/review-gates`,
     hiveQueue: () => `${ws}/hive/queue`,
+    hiveHermes: () => `${ws}/hive/hermes`,
     attachmentPreview: (id: string) => `${ws}/attachments/${encode(id)}/preview`,
   };
 }

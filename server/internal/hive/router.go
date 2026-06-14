@@ -3,14 +3,17 @@ package hive
 import (
 	"encoding/json"
 	"net/http"
+	"strconv"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/multica-ai/multica/server/internal/realtime"
 )
 
 // Router returns a chi sub-router for all Hive plugin endpoints.
 // It is mounted under /api/plugins/hive inside the existing authenticated
 // chi group, so it inherits auth middleware — no separate auth here.
-func Router(store *Store) chi.Router {
+// hub is used to publish realtime events; pass nil to disable publishing.
+func Router(store *Store, hub realtime.Broadcaster) chi.Router {
 	r := chi.NewRouter()
 
 	r.Get("/healthz", func(w http.ResponseWriter, _ *http.Request) {
@@ -28,6 +31,11 @@ func Router(store *Store) chi.Router {
 	r.Get("/personal-queue-items", handleListPersonalQueueItems(store))
 	r.Post("/personal-queue-items", handleCreatePersonalQueueItem(store))
 	r.Patch("/personal-queue-items/{id}", handleUpdatePersonalQueueItem(store))
+
+	r.Get("/hermes-threads", handleListThreads(store))
+	r.Post("/hermes-threads", handleCreateThread(store))
+	r.Get("/hermes-messages", handleListMessages(store))
+	r.Post("/hermes-messages", handleCreateMessage(store, hub))
 
 	return r
 }
@@ -271,6 +279,121 @@ func handleUpdatePersonalQueueItem(store *Store) http.HandlerFunc {
 			return
 		}
 		writeJSON(w, http.StatusOK, item)
+	}
+}
+
+func handleListThreads(store *Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		wsID := r.URL.Query().Get("workspace_id")
+		if wsID == "" {
+			http.Error(w, `{"error":"workspace_id is required"}`, http.StatusBadRequest)
+			return
+		}
+		threads, err := store.ListThreads(r.Context(), wsID)
+		if err != nil {
+			http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
+			return
+		}
+		if threads == nil {
+			threads = []HermesThread{}
+		}
+		writeJSON(w, http.StatusOK, threads)
+	}
+}
+
+type createThreadRequest struct {
+	WorkspaceID string `json:"workspace_id"`
+	Title       string `json:"title"`
+	CreatedBy   string `json:"created_by"`
+}
+
+func handleCreateThread(store *Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req createThreadRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, `{"error":"invalid request body"}`, http.StatusBadRequest)
+			return
+		}
+		if req.WorkspaceID == "" {
+			http.Error(w, `{"error":"workspace_id is required"}`, http.StatusBadRequest)
+			return
+		}
+		thread, err := store.CreateThread(r.Context(), req.WorkspaceID, req.Title, req.CreatedBy)
+		if err != nil {
+			http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, http.StatusCreated, thread)
+	}
+}
+
+func handleListMessages(store *Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		threadID := r.URL.Query().Get("thread_id")
+		wsID := r.URL.Query().Get("workspace_id")
+		if threadID == "" || wsID == "" {
+			http.Error(w, `{"error":"thread_id and workspace_id are required"}`, http.StatusBadRequest)
+			return
+		}
+		before := r.URL.Query().Get("before")
+		limit := 30
+		if ls := r.URL.Query().Get("limit"); ls != "" {
+			if n, err := strconv.Atoi(ls); err == nil && n > 0 {
+				limit = n
+			}
+		}
+		msgs, err := store.ListMessages(r.Context(), threadID, before, limit)
+		if err != nil {
+			http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
+			return
+		}
+		if msgs == nil {
+			msgs = []HermesMessage{}
+		}
+		writeJSON(w, http.StatusOK, msgs)
+	}
+}
+
+type createMessageRequest struct {
+	ThreadID    string `json:"thread_id"`
+	WorkspaceID string `json:"workspace_id"`
+	AuthorID    string `json:"author_id"`
+	Body        string `json:"body"`
+}
+
+func handleCreateMessage(store *Store, hub realtime.Broadcaster) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req createMessageRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, `{"error":"invalid request body"}`, http.StatusBadRequest)
+			return
+		}
+		if req.ThreadID == "" || req.WorkspaceID == "" {
+			http.Error(w, `{"error":"thread_id and workspace_id are required"}`, http.StatusBadRequest)
+			return
+		}
+		if req.Body == "" {
+			http.Error(w, `{"error":"body is required"}`, http.StatusBadRequest)
+			return
+		}
+		msg, err := store.CreateMessage(r.Context(), req.ThreadID, req.WorkspaceID, req.AuthorID, req.Body)
+		if err != nil {
+			http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
+			return
+		}
+		if hub != nil {
+			event := map[string]any{
+				"type": "hive:message:created",
+				"payload": map[string]any{
+					"thread_id": msg.ThreadID,
+					"message":   msg,
+				},
+			}
+			if data, jerr := json.Marshal(event); jerr == nil {
+				hub.BroadcastToWorkspace(req.WorkspaceID, data)
+			}
+		}
+		writeJSON(w, http.StatusCreated, msg)
 	}
 }
 

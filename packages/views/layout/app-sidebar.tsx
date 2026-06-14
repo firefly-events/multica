@@ -38,6 +38,7 @@ import {
   GitBranch,
   ShieldCheck,
   ClipboardList,
+  MessageSquare,
 } from "lucide-react";
 import { WorkspaceAvatar } from "../workspace/workspace-avatar";
 import { ActorAvatar } from "@multica/ui/components/common/actor-avatar";
@@ -123,7 +124,8 @@ type NavKey =
   | "settings"
   | "hiveEpics"
   | "hiveReviewGates"
-  | "hiveQueue";
+  | "hiveQueue"
+  | "hiveHermes";
 
 // Static schema (key + icon) — labels resolved at render via useT("layout").
 type NavLabelKey =
@@ -140,7 +142,8 @@ type NavLabelKey =
   | "settings"
   | "epics"
   | "review_gates"
-  | "my_queue";
+  | "my_queue"
+  | "hermes";
 
 const personalNav: { key: NavKey; labelKey: NavLabelKey; icon: typeof Inbox }[] = [
   { key: "inbox", labelKey: "inbox", icon: Inbox },
@@ -153,6 +156,7 @@ const workspaceNav: { key: NavKey; labelKey: NavLabelKey; icon: typeof Inbox }[]
   { key: "hiveEpics", labelKey: "epics", icon: GitBranch },
   { key: "hiveReviewGates", labelKey: "review_gates", icon: ShieldCheck },
   { key: "hiveQueue", labelKey: "my_queue", icon: ClipboardList },
+  { key: "hiveHermes", labelKey: "hermes", icon: MessageSquare },
   { key: "autopilots", labelKey: "autopilots", icon: Zap },
   { key: "agents", labelKey: "agents", icon: Bot },
   { key: "squads", labelKey: "squads", icon: Users },

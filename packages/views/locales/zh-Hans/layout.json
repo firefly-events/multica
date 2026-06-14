@@ -13,7 +13,8 @@
     "settings": "设置",
     "epics": "史诗",
     "review_gates": "审查门禁",
-    "my_queue": "我的队列"
+    "my_queue": "我的队列",
+    "hermes": "Hermes"
   },
   "help": {
     "trigger": "帮助",

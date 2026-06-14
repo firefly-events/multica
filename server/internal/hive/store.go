@@ -220,6 +220,125 @@ func (s *Store) UpdatePersonalQueueItem(ctx context.Context, id, assigneeID, sta
 	return it, nil
 }
 
+// HermesThread is a single row from hive.hermes_threads.
+type HermesThread struct {
+	ID          string
+	WorkspaceID string
+	Title       string
+	CreatedBy   string
+	CreatedAt   string
+}
+
+// HermesMessage is a single row from hive.hermes_messages.
+type HermesMessage struct {
+	ID          string
+	ThreadID    string
+	WorkspaceID string
+	AuthorID    string
+	Body        string
+	CreatedAt   string
+}
+
+// ListThreads returns all threads for a workspace, newest first.
+func (s *Store) ListThreads(ctx context.Context, workspaceID string) ([]HermesThread, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT id::text, workspace_id::text, title, created_by, created_at::text
+		FROM hive.hermes_threads
+		WHERE workspace_id = $1::uuid
+		ORDER BY created_at DESC
+	`, workspaceID)
+	if err != nil {
+		return nil, fmt.Errorf("hive: list threads: %w", err)
+	}
+	defer rows.Close()
+
+	var threads []HermesThread
+	for rows.Next() {
+		var t HermesThread
+		if err := rows.Scan(&t.ID, &t.WorkspaceID, &t.Title, &t.CreatedBy, &t.CreatedAt); err != nil {
+			return nil, fmt.Errorf("hive: scan thread: %w", err)
+		}
+		threads = append(threads, t)
+	}
+	return threads, rows.Err()
+}
+
+// CreateThread inserts a new thread row.
+func (s *Store) CreateThread(ctx context.Context, workspaceID, title, createdBy string) (HermesThread, error) {
+	var t HermesThread
+	err := s.pool.QueryRow(ctx, `
+		INSERT INTO hive.hermes_threads (workspace_id, title, created_by)
+		VALUES ($1::uuid, $2, $3)
+		RETURNING id::text, workspace_id::text, title, created_by, created_at::text
+	`, workspaceID, title, createdBy).Scan(
+		&t.ID, &t.WorkspaceID, &t.Title, &t.CreatedBy, &t.CreatedAt,
+	)
+	if err != nil {
+		return HermesThread{}, fmt.Errorf("hive: create thread: %w", err)
+	}
+	return t, nil
+}
+
+// ListMessages returns up to limit messages for a thread in DESC order (newest first).
+// If before is non-empty it is used as a created_at upper-bound (exclusive) for pagination.
+// limit is clamped to 100.
+func (s *Store) ListMessages(ctx context.Context, threadID, before string, limit int) ([]HermesMessage, error) {
+	if limit <= 0 || limit > 100 {
+		limit = 30
+	}
+
+	var rows pgx.Rows
+	var qErr error
+
+	if before != "" {
+		rows, qErr = s.pool.Query(ctx, `
+			SELECT id::text, thread_id::text, workspace_id::text, author_id, body, created_at::text
+			FROM hive.hermes_messages
+			WHERE thread_id = $1::uuid AND created_at < $2::timestamptz
+			ORDER BY created_at DESC
+			LIMIT $3
+		`, threadID, before, limit)
+	} else {
+		rows, qErr = s.pool.Query(ctx, `
+			SELECT id::text, thread_id::text, workspace_id::text, author_id, body, created_at::text
+			FROM hive.hermes_messages
+			WHERE thread_id = $1::uuid
+			ORDER BY created_at DESC
+			LIMIT $2
+		`, threadID, limit)
+	}
+	if qErr != nil {
+		return nil, fmt.Errorf("hive: list messages: %w", qErr)
+	}
+	defer rows.Close()
+
+	var msgs []HermesMessage
+	for rows.Next() {
+		var m HermesMessage
+		if err := rows.Scan(&m.ID, &m.ThreadID, &m.WorkspaceID, &m.AuthorID, &m.Body, &m.CreatedAt); err != nil {
+			return nil, fmt.Errorf("hive: scan message: %w", err)
+		}
+		msgs = append(msgs, m)
+	}
+	return msgs, rows.Err()
+}
+
+// CreateMessage inserts a new message into a thread.
+func (s *Store) CreateMessage(ctx context.Context, threadID, workspaceID, authorID, body string) (HermesMessage, error) {
+	var m HermesMessage
+	err := s.pool.QueryRow(ctx, `
+		INSERT INTO hive.hermes_messages (thread_id, workspace_id, author_id, body)
+		VALUES ($1::uuid, $2::uuid, $3, $4)
+		RETURNING id::text, thread_id::text, workspace_id::text, author_id, body, created_at::text
+	`, threadID, workspaceID, authorID, body).Scan(
+		&m.ID, &m.ThreadID, &m.WorkspaceID, &m.AuthorID, &m.Body, &m.CreatedAt,
+	)
+	if err != nil {
+		return HermesMessage{}, fmt.Errorf("hive: create message: %w", err)
+	}
+	return m, nil
+}
+
 // CreateReviewGate inserts a new gate row (upsert on workspace+epic+key).
 func (s *Store) CreateReviewGate(ctx context.Context, workspaceID, epicID, gateKey, state, updatedBy string, evidence []byte) (ReviewGate, error) {
 	if evidence == nil {

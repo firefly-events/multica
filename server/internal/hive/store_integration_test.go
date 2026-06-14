@@ -94,6 +94,91 @@ func TestEpicNodeRoundTrip(t *testing.T) {
 	_, _ = pool.Exec(ctx, `DELETE FROM hive.epic_nodes WHERE id = $1::uuid`, created.ID)
 }
 
+func TestHermesThreadMessageRoundTrip(t *testing.T) {
+	pool := testPool(t)
+	ctx := context.Background()
+
+	if err := hive.RunMigrations(ctx, pool); err != nil {
+		t.Fatalf("RunMigrations: %v", err)
+	}
+
+	store := hive.NewStore(pool)
+
+	const workspaceID = "00000000-0000-0000-0000-000000000004"
+
+	// Create thread
+	thread, err := store.CreateThread(ctx, workspaceID, "Test Thread", "user-1")
+	if err != nil {
+		t.Fatalf("CreateThread: %v", err)
+	}
+	if thread.ID == "" {
+		t.Fatal("CreateThread: empty ID returned")
+	}
+	if thread.Title != "Test Thread" {
+		t.Errorf("Title: got %q want %q", thread.Title, "Test Thread")
+	}
+
+	// List threads
+	threads, err := store.ListThreads(ctx, workspaceID)
+	if err != nil {
+		t.Fatalf("ListThreads: %v", err)
+	}
+	found := false
+	for _, th := range threads {
+		if th.ID == thread.ID {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("ListThreads: created thread %q not in results", thread.ID)
+	}
+
+	// Create messages
+	msg1, err := store.CreateMessage(ctx, thread.ID, workspaceID, "user-1", "Hello")
+	if err != nil {
+		t.Fatalf("CreateMessage(1): %v", err)
+	}
+	if msg1.ID == "" {
+		t.Fatal("CreateMessage: empty ID returned")
+	}
+	if msg1.Body != "Hello" {
+		t.Errorf("Body: got %q want %q", msg1.Body, "Hello")
+	}
+
+	msg2, err := store.CreateMessage(ctx, thread.ID, workspaceID, "user-2", "World")
+	if err != nil {
+		t.Fatalf("CreateMessage(2): %v", err)
+	}
+
+	// List messages (no cursor)
+	msgs, err := store.ListMessages(ctx, thread.ID, "", 30)
+	if err != nil {
+		t.Fatalf("ListMessages: %v", err)
+	}
+	if len(msgs) < 2 {
+		t.Fatalf("ListMessages: expected >= 2 messages, got %d", len(msgs))
+	}
+	// Newest first (msg2 should appear before msg1)
+	if msgs[0].ID != msg2.ID {
+		t.Errorf("ListMessages: expected newest first, got %q", msgs[0].ID)
+	}
+
+	// List messages with before cursor (should exclude msg2)
+	msgsPage, err := store.ListMessages(ctx, thread.ID, msg2.CreatedAt, 30)
+	if err != nil {
+		t.Fatalf("ListMessages (before): %v", err)
+	}
+	for _, m := range msgsPage {
+		if m.ID == msg2.ID {
+			t.Errorf("ListMessages (before): msg2 should be excluded by cursor")
+		}
+	}
+
+	// Cleanup
+	_, _ = pool.Exec(ctx, `DELETE FROM hive.hermes_messages WHERE thread_id = $1::uuid`, thread.ID)
+	_, _ = pool.Exec(ctx, `DELETE FROM hive.hermes_threads WHERE id = $1::uuid`, thread.ID)
+}
+
 func TestReviewGateRoundTrip(t *testing.T) {
 	pool := testPool(t)
 	ctx := context.Background()

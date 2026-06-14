@@ -1153,7 +1153,7 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 
 		// Hive plugin routes — build-linked, inherit auth from this group.
 		if opts.HiveStore != nil {
-			r.Mount("/api/plugins/hive", hive.Router(opts.HiveStore))
+			r.Mount("/api/plugins/hive", hive.Router(opts.HiveStore, hub))
 		}
 	})
 
