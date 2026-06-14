@@ -2,6 +2,7 @@ package hive
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/jackc/pgx/v5"
@@ -380,6 +381,139 @@ func (s *Store) TouchCatalogBrowse(ctx context.Context, workspaceID, catalogVers
 		return fmt.Errorf("hive: touch catalog browse: %w", err)
 	}
 	return nil
+}
+
+// ErrCatalogSkillCollision is returned when a skill with the same name exists
+// and the caller did not request an overwrite.
+var ErrCatalogSkillCollision = errors.New("hive: skill name collision")
+
+// CatalogMaterialization is a single row from hive.plugin_skill_catalog_materializations.
+type CatalogMaterialization struct {
+	ID             string
+	WorkspaceID    string
+	SkillID        string
+	CatalogKey     string
+	CatalogVersion string
+	State          string
+	MaterializedBy string
+	CreatedAt      string
+	UpdatedAt      string
+}
+
+// MaterializeCatalogSkillParams is the input for MaterializeCatalogSkill.
+type MaterializeCatalogSkillParams struct {
+	WorkspaceID    string
+	CatalogKey     string
+	CatalogVersion string
+	SkillName      string
+	Description    string
+	Content        string
+	Config         []byte // JSONB for public.skill.config
+	MaterializedBy string // user/agent UUID; empty → NULL creator
+	Overwrite      bool
+}
+
+// MaterializeCatalogSkill materializes a catalog skill into Multica's native
+// public.skill + public.skill_file rows and records provenance in
+// hive.plugin_skill_catalog_materializations, all within one transaction.
+//
+// Name collision (workspace_id, name) in public.skill returns
+// ErrCatalogSkillCollision unless Overwrite is true.
+func (s *Store) MaterializeCatalogSkill(ctx context.Context, p MaterializeCatalogSkillParams) (CatalogMaterialization, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return CatalogMaterialization{}, fmt.Errorf("hive: materialize catalog skill: begin tx: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	// Collision check: (workspace_id, name) unique on public.skill.
+	var existingSkillID string
+	cerr := tx.QueryRow(ctx, `
+		SELECT id::text FROM skill
+		WHERE workspace_id = $1::uuid AND name = $2
+		LIMIT 1
+	`, p.WorkspaceID, p.SkillName).Scan(&existingSkillID)
+	if cerr != nil && !errors.Is(cerr, pgx.ErrNoRows) {
+		return CatalogMaterialization{}, fmt.Errorf("hive: materialize catalog skill: check collision: %w", cerr)
+	}
+
+	collision := existingSkillID != ""
+	if collision && !p.Overwrite {
+		return CatalogMaterialization{}, ErrCatalogSkillCollision
+	}
+
+	// Validate the SKILL.md path we'll use for the skill_file row.
+	if !isValidFilePath("SKILL.md") {
+		return CatalogMaterialization{}, fmt.Errorf("hive: materialize catalog skill: invalid file path")
+	}
+
+	var skillID string
+	if collision {
+		err = tx.QueryRow(ctx, `
+			UPDATE skill
+			SET description = $2, content = $3, config = $4::jsonb, updated_at = now()
+			WHERE id = $1::uuid
+			RETURNING id::text
+		`, existingSkillID, p.Description, p.Content, p.Config).Scan(&skillID)
+		if err != nil {
+			return CatalogMaterialization{}, fmt.Errorf("hive: materialize catalog skill: update skill: %w", err)
+		}
+		// Overwrite the SKILL.md skill_file.
+		_, err = tx.Exec(ctx, `
+			INSERT INTO skill_file (skill_id, path, content)
+			VALUES ($1::uuid, 'SKILL.md', $2)
+			ON CONFLICT (skill_id, path) DO UPDATE
+				SET content = EXCLUDED.content, updated_at = now()
+		`, skillID, p.Content)
+		if err != nil {
+			return CatalogMaterialization{}, fmt.Errorf("hive: materialize catalog skill: upsert skill_file: %w", err)
+		}
+	} else {
+		err = tx.QueryRow(ctx, `
+			INSERT INTO skill (workspace_id, name, description, content, config, created_by)
+			VALUES ($1::uuid, $2, $3, $4, $5::jsonb, NULLIF($6, '')::uuid)
+			RETURNING id::text
+		`, p.WorkspaceID, p.SkillName, p.Description, p.Content, p.Config, p.MaterializedBy).Scan(&skillID)
+		if err != nil {
+			return CatalogMaterialization{}, fmt.Errorf("hive: materialize catalog skill: insert skill: %w", err)
+		}
+		_, err = tx.Exec(ctx, `
+			INSERT INTO skill_file (skill_id, path, content)
+			VALUES ($1::uuid, 'SKILL.md', $2)
+		`, skillID, p.Content)
+		if err != nil {
+			return CatalogMaterialization{}, fmt.Errorf("hive: materialize catalog skill: insert skill_file: %w", err)
+		}
+	}
+
+	// Upsert provenance in hive schema.
+	var mat CatalogMaterialization
+	err = tx.QueryRow(ctx, `
+		INSERT INTO hive.plugin_skill_catalog_materializations
+			(workspace_id, skill_id, catalog_key, catalog_version, state, materialized_by)
+		VALUES ($1::uuid, $2::uuid, $3, $4, 'active', $5)
+		ON CONFLICT (workspace_id, catalog_key) DO UPDATE
+			SET skill_id        = EXCLUDED.skill_id,
+			    catalog_version = EXCLUDED.catalog_version,
+			    materialized_by = EXCLUDED.materialized_by,
+			    updated_at      = now()
+		RETURNING id::text, workspace_id::text, skill_id::text, catalog_key,
+		          catalog_version, state, materialized_by,
+		          created_at::text, updated_at::text
+	`, p.WorkspaceID, skillID, p.CatalogKey, p.CatalogVersion, p.MaterializedBy).Scan(
+		&mat.ID, &mat.WorkspaceID, &mat.SkillID, &mat.CatalogKey,
+		&mat.CatalogVersion, &mat.State, &mat.MaterializedBy,
+		&mat.CreatedAt, &mat.UpdatedAt,
+	)
+	if err != nil {
+		return CatalogMaterialization{}, fmt.Errorf("hive: materialize catalog skill: upsert provenance: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return CatalogMaterialization{}, fmt.Errorf("hive: materialize catalog skill: commit: %w", err)
+	}
+
+	return mat, nil
 }
 
 // CreateReviewGate inserts a new gate row (upsert on workspace+epic+key).

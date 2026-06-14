@@ -3,8 +3,12 @@ package hive
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
+	"path/filepath"
 	"strconv"
+	"strings"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/multica-ai/multica/server/internal/realtime"
@@ -39,6 +43,7 @@ func Router(store *Store, hub realtime.Broadcaster) chi.Router {
 	r.Post("/hermes-messages", handleCreateMessage(store, hub))
 
 	r.Get("/skill-catalog", handleGetSkillCatalog(store))
+	r.Post("/skill-catalog/materialize", handleMaterializeCatalogSkill(store))
 
 	return r
 }
@@ -440,6 +445,92 @@ func handleGetSkillCatalog(store *Store) http.HandlerFunc {
 			Skills:  catalog.Skills,
 			State:   state,
 		})
+	}
+}
+
+// isValidFilePath mirrors the validateFilePath logic from server/internal/handler/skill.go
+// so catalog materialization applies the same path-safety rules without creating
+// a cross-package import cycle.
+func isValidFilePath(p string) bool {
+	if p == "" {
+		return false
+	}
+	if filepath.IsAbs(p) {
+		return false
+	}
+	cleaned := filepath.Clean(p)
+	return !strings.HasPrefix(cleaned, "..")
+}
+
+// buildCatalogSkillContent constructs the SKILL.md body for a catalog skill.
+func buildCatalogSkillContent(s CatalogSkill) string {
+	return fmt.Sprintf("---\nname: %s\ndescription: %s\nversion: %s\n---\n\n%s",
+		s.Name, s.Description, s.Version, s.WhenToUse)
+}
+
+type materializeCatalogSkillRequest struct {
+	WorkspaceID string `json:"workspace_id"`
+	CatalogKey  string `json:"catalog_key"`
+	Overwrite   bool   `json:"overwrite"`
+}
+
+func handleMaterializeCatalogSkill(store *Store) http.HandlerFunc {
+	catalog := loadCatalog()
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req materializeCatalogSkillRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, `{"error":"invalid request body"}`, http.StatusBadRequest)
+			return
+		}
+		if req.WorkspaceID == "" || req.CatalogKey == "" {
+			http.Error(w, `{"error":"workspace_id and catalog_key are required"}`, http.StatusBadRequest)
+			return
+		}
+
+		// Locate catalog skill by name (catalog_key is the skill Name).
+		var found *CatalogSkill
+		for i := range catalog.Skills {
+			if catalog.Skills[i].Name == req.CatalogKey {
+				found = &catalog.Skills[i]
+				break
+			}
+		}
+		if found == nil {
+			http.Error(w, `{"error":"catalog skill not found"}`, http.StatusNotFound)
+			return
+		}
+
+		materializedBy := r.Header.Get("X-User-ID")
+		content := buildCatalogSkillContent(*found)
+		config, _ := json.Marshal(map[string]any{
+			"origin": map[string]any{
+				"type":            "hive_catalog",
+				"catalog_key":     found.Name,
+				"catalog_version": catalog.Version,
+			},
+		})
+
+		mat, err := store.MaterializeCatalogSkill(r.Context(), MaterializeCatalogSkillParams{
+			WorkspaceID:    req.WorkspaceID,
+			CatalogKey:     found.Name,
+			CatalogVersion: catalog.Version,
+			SkillName:      found.Name,
+			Description:    found.Description,
+			Content:        content,
+			Config:         config,
+			MaterializedBy: materializedBy,
+			Overwrite:      req.Overwrite,
+		})
+		if err != nil {
+			if errors.Is(err, ErrCatalogSkillCollision) {
+				http.Error(w, `{"error":"skill with this name already exists; set overwrite=true to replace"}`, http.StatusConflict)
+				return
+			}
+			http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
+			return
+		}
+
+		writeJSON(w, http.StatusCreated, mat)
 	}
 }
 
