@@ -1,6 +1,7 @@
 package hive
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"strconv"
@@ -36,6 +37,8 @@ func Router(store *Store, hub realtime.Broadcaster) chi.Router {
 	r.Post("/hermes-threads", handleCreateThread(store))
 	r.Get("/hermes-messages", handleListMessages(store))
 	r.Post("/hermes-messages", handleCreateMessage(store, hub))
+
+	r.Get("/skill-catalog", handleGetSkillCatalog(store))
 
 	return r
 }
@@ -394,6 +397,49 @@ func handleCreateMessage(store *Store, hub realtime.Broadcaster) http.HandlerFun
 			}
 		}
 		writeJSON(w, http.StatusCreated, msg)
+	}
+}
+
+type skillCatalogResponse struct {
+	Version string         `json:"version"`
+	Skills  []CatalogSkill `json:"skills"`
+	State   any            `json:"state"`
+}
+
+// handleGetSkillCatalog serves the embedded versioned Hive skill catalog.
+// It is read-only and works entirely offline — no runtime or daemon needed.
+// On each call it records a browse event in hive.plugin_skill_catalog_state
+// without touching the core public skill/skill_file tables.
+func handleGetSkillCatalog(store *Store) http.HandlerFunc {
+	catalog := loadCatalog()
+	return func(w http.ResponseWriter, r *http.Request) {
+		wsID := r.URL.Query().Get("workspace_id")
+		if wsID == "" {
+			http.Error(w, `{"error":"workspace_id is required"}`, http.StatusBadRequest)
+			return
+		}
+
+		// Record browse event asynchronously so it never blocks the response.
+		// Use context.Background() — r.Context() is cancelled after handler returns.
+		go func() {
+			_ = store.TouchCatalogBrowse(context.Background(), wsID, catalog.Version)
+		}()
+
+		state, err := store.GetOrCreateCatalogState(r.Context(), wsID)
+		if err != nil {
+			// Non-fatal: serve catalog even if state tracking fails.
+			writeJSON(w, http.StatusOK, skillCatalogResponse{
+				Version: catalog.Version,
+				Skills:  catalog.Skills,
+			})
+			return
+		}
+
+		writeJSON(w, http.StatusOK, skillCatalogResponse{
+			Version: catalog.Version,
+			Skills:  catalog.Skills,
+			State:   state,
+		})
 	}
 }
 

@@ -68,6 +68,8 @@ import {
   type SkillActionsContext,
 } from "./skill-list-actions";
 import { useT, useTimeAgo } from "../../i18n";
+import { type SkillRow, useSkillColumns } from "./skill-columns";
+import { SkillCatalogPanel } from "@multica/hive";
 
 // Column template — single source of truth for header, rows, and skeletons.
 // Tracks: [edge 0.75rem] [checkbox 1rem] [name, only fr track]
@@ -941,6 +943,9 @@ export default function SkillsPage() {
         ctx={actionsCtx}
         onClear={() => setSelectedIds(new Set())}
       />
+
+      <SkillCatalogPanel />
+
 
       {createOpen && (
         <CreateSkillDialog

@@ -339,6 +339,49 @@ func (s *Store) CreateMessage(ctx context.Context, threadID, workspaceID, author
 	return m, nil
 }
 
+// PluginSkillCatalogState is a single row from hive.plugin_skill_catalog_state.
+type PluginSkillCatalogState struct {
+	ID             string
+	WorkspaceID    string
+	CatalogVersion string
+	LastBrowsedAt  *string // nil if never browsed
+}
+
+// GetOrCreateCatalogState returns the catalog state row for the workspace,
+// inserting a default row if none exists yet.
+func (s *Store) GetOrCreateCatalogState(ctx context.Context, workspaceID string) (PluginSkillCatalogState, error) {
+	var st PluginSkillCatalogState
+	err := s.pool.QueryRow(ctx, `
+		INSERT INTO hive.plugin_skill_catalog_state (workspace_id)
+		VALUES ($1::uuid)
+		ON CONFLICT (workspace_id) DO UPDATE
+			SET workspace_id = EXCLUDED.workspace_id
+		RETURNING id::text, workspace_id::text, catalog_version,
+		          last_browsed_at::text
+	`, workspaceID).Scan(&st.ID, &st.WorkspaceID, &st.CatalogVersion, &st.LastBrowsedAt)
+	if err != nil {
+		return PluginSkillCatalogState{}, fmt.Errorf("hive: get or create catalog state: %w", err)
+	}
+	return st, nil
+}
+
+// TouchCatalogBrowse updates last_browsed_at and catalog_version for the
+// workspace's catalog state row (upserts if missing). Called on each browse.
+func (s *Store) TouchCatalogBrowse(ctx context.Context, workspaceID, catalogVersion string) error {
+	_, err := s.pool.Exec(ctx, `
+		INSERT INTO hive.plugin_skill_catalog_state (workspace_id, catalog_version, last_browsed_at)
+		VALUES ($1::uuid, $2, now())
+		ON CONFLICT (workspace_id) DO UPDATE
+			SET catalog_version  = EXCLUDED.catalog_version,
+			    last_browsed_at  = now(),
+			    updated_at       = now()
+	`, workspaceID, catalogVersion)
+	if err != nil {
+		return fmt.Errorf("hive: touch catalog browse: %w", err)
+	}
+	return nil
+}
+
 // CreateReviewGate inserts a new gate row (upsert on workspace+epic+key).
 func (s *Store) CreateReviewGate(ctx context.Context, workspaceID, epicID, gateKey, state, updatedBy string, evidence []byte) (ReviewGate, error) {
 	if evidence == nil {

@@ -1,0 +1,71 @@
+{
+  "version": "1.0.0",
+  "skills": [
+    {
+      "name": "code-review",
+      "description": "Review the current diff for correctness bugs and reuse/simplification/efficiency cleanups at the given effort level. Pass --comment to post findings as inline PR comments, or --fix to apply them.",
+      "version": "1.0.0",
+      "when_to_use": "When asked to review code changes, a PR, or a branch for bugs and quality issues."
+    },
+    {
+      "name": "simplify",
+      "description": "Review the changed code for reuse, simplification, efficiency, and altitude cleanups, then apply the fixes. Quality only — does not hunt for bugs.",
+      "version": "1.0.0",
+      "when_to_use": "After implementing a feature, to clean up the code without changing behavior."
+    },
+    {
+      "name": "verify",
+      "description": "Verify that a code change actually does what it's supposed to by running the app and observing behavior.",
+      "version": "1.0.0",
+      "when_to_use": "When asked to verify a PR, confirm a fix works, test a change manually, or validate local changes before pushing."
+    },
+    {
+      "name": "security-review",
+      "description": "Run a structured security audit on the current changes, identifying OWASP Top 10 vulnerabilities, secrets exposure, and authentication flaws.",
+      "version": "1.0.0",
+      "when_to_use": "Before merging changes that touch auth, API endpoints, user data handling, or dependency updates."
+    },
+    {
+      "name": "deep-research",
+      "description": "Deep research harness — fan-out web searches, fetch sources, adversarially verify claims, synthesize a cited report.",
+      "version": "1.0.0",
+      "when_to_use": "When the user wants a deep, multi-source, fact-checked research report on any topic."
+    },
+    {
+      "name": "loop",
+      "description": "Run a prompt or slash command on a recurring interval. Omit the interval to let the model self-pace.",
+      "version": "1.0.0",
+      "when_to_use": "When the user wants to set up a recurring task, poll for status, or run something repeatedly on an interval."
+    },
+    {
+      "name": "schedule",
+      "description": "Create, update, list, or run scheduled cloud agents (routines) that execute on a cron schedule.",
+      "version": "1.0.0",
+      "when_to_use": "When the user wants to schedule a recurring cloud agent, set up automated tasks, or manage their scheduled agents."
+    },
+    {
+      "name": "run",
+      "description": "Launch and drive this project's app to see a change working.",
+      "version": "1.0.0",
+      "when_to_use": "When asked to run, start, or screenshot the app, or to confirm a change works in the real app (not just tests)."
+    },
+    {
+      "name": "init",
+      "description": "Initialize project — set up Claude Code configuration, CLAUDE.md, and recommended settings for a new codebase.",
+      "version": "1.0.0",
+      "when_to_use": "When starting work in a new repository or onboarding onto an existing codebase."
+    },
+    {
+      "name": "create-prompt",
+      "description": "Create a well-structured prompt for a specific task or use case.",
+      "version": "1.0.0",
+      "when_to_use": "When the user wants to create a reusable prompt template for a recurring workflow."
+    },
+    {
+      "name": "research-brief",
+      "description": "Produce a concise research brief on a topic — key facts, trade-offs, and recommended next steps.",
+      "version": "1.0.0",
+      "when_to_use": "When the user needs a quick orientation on a new technology, library, or design decision."
+    }
+  ]
+}
