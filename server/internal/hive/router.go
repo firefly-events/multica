@@ -25,6 +25,10 @@ func Router(store *Store) chi.Router {
 	r.Get("/review-gates/{id}", handleGetReviewGate(store))
 	r.Patch("/review-gates/{id}", handleUpdateReviewGate(store))
 
+	r.Get("/personal-queue-items", handleListPersonalQueueItems(store))
+	r.Post("/personal-queue-items", handleCreatePersonalQueueItem(store))
+	r.Patch("/personal-queue-items/{id}", handleUpdatePersonalQueueItem(store))
+
 	return r
 }
 
@@ -173,6 +177,100 @@ func handleUpdateReviewGate(store *Store) http.HandlerFunc {
 			return
 		}
 		writeJSON(w, http.StatusOK, gate)
+	}
+}
+
+func handleListPersonalQueueItems(store *Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		wsID := r.URL.Query().Get("workspace_id")
+		if wsID == "" {
+			http.Error(w, `{"error":"workspace_id is required"}`, http.StatusBadRequest)
+			return
+		}
+		userID := r.Header.Get("X-User-ID")
+		if userID == "" {
+			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+			return
+		}
+		items, err := store.ListPersonalQueueItems(r.Context(), wsID, userID)
+		if err != nil {
+			http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
+			return
+		}
+		if items == nil {
+			items = []PersonalQueueItem{}
+		}
+		writeJSON(w, http.StatusOK, items)
+	}
+}
+
+type createPersonalQueueItemRequest struct {
+	WorkspaceID string          `json:"workspace_id"`
+	RefKind     string          `json:"ref_kind"`
+	RefID       string          `json:"ref_id"`
+	Title       string          `json:"title"`
+	Meta        json.RawMessage `json:"meta"`
+}
+
+func handleCreatePersonalQueueItem(store *Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		userID := r.Header.Get("X-User-ID")
+		if userID == "" {
+			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+			return
+		}
+		var req createPersonalQueueItemRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, `{"error":"invalid request body"}`, http.StatusBadRequest)
+			return
+		}
+		if req.WorkspaceID == "" {
+			http.Error(w, `{"error":"workspace_id is required"}`, http.StatusBadRequest)
+			return
+		}
+		meta := []byte(req.Meta)
+		item, err := store.CreatePersonalQueueItem(r.Context(), req.WorkspaceID, userID, req.RefKind, req.RefID, req.Title, meta)
+		if err != nil {
+			http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, http.StatusCreated, item)
+	}
+}
+
+type updatePersonalQueueItemRequest struct {
+	Status string          `json:"status"`
+	Meta   json.RawMessage `json:"meta"`
+}
+
+func handleUpdatePersonalQueueItem(store *Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		id := chi.URLParam(r, "id")
+		if id == "" {
+			http.Error(w, `{"error":"missing id"}`, http.StatusBadRequest)
+			return
+		}
+		userID := r.Header.Get("X-User-ID")
+		if userID == "" {
+			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+			return
+		}
+		var req updatePersonalQueueItemRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, `{"error":"invalid request body"}`, http.StatusBadRequest)
+			return
+		}
+		if req.Status == "" {
+			http.Error(w, `{"error":"status is required"}`, http.StatusBadRequest)
+			return
+		}
+		meta := []byte(req.Meta)
+		item, err := store.UpdatePersonalQueueItem(r.Context(), id, userID, req.Status, meta)
+		if err != nil {
+			http.Error(w, `{"error":"not found or not authorized"}`, http.StatusNotFound)
+			return
+		}
+		writeJSON(w, http.StatusOK, item)
 	}
 }
 

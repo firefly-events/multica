@@ -12,7 +12,8 @@
     "skills": "Skills",
     "settings": "Settings",
     "epics": "Epics",
-    "review_gates": "Review Gates"
+    "review_gates": "Review Gates",
+    "my_queue": "My Queue"
   },
   "help": {
     "trigger": "Help",

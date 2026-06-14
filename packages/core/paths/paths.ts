@@ -39,6 +39,7 @@ function workspaceScoped(slug: string) {
     settings: () => `${ws}/settings`,
     hiveEpics: () => `${ws}/hive/epics`,
     hiveReviewGates: () => `${ws}/hive/review-gates`,
+    hiveQueue: () => `${ws}/hive/queue`,
     attachmentPreview: (id: string) => `${ws}/attachments/${encode(id)}/preview`,
   };
 }

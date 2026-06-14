@@ -139,6 +139,87 @@ func (s *Store) UpdateReviewGate(ctx context.Context, id, state, updatedBy strin
 	return g, nil
 }
 
+// PersonalQueueItem is a single row from hive.personal_queue_items.
+type PersonalQueueItem struct {
+	ID          string
+	WorkspaceID string
+	AssigneeID  string
+	RefKind     string
+	RefID       string
+	Title       string
+	Status      string
+	Meta        []byte
+}
+
+// ListPersonalQueueItems returns all queue items for a given workspace + assignee.
+// Both predicates are required — a user never sees another user's items.
+func (s *Store) ListPersonalQueueItems(ctx context.Context, workspaceID, assigneeID string) ([]PersonalQueueItem, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT id::text, workspace_id::text, assignee_id::text, ref_kind, ref_id, title, status, meta
+		FROM hive.personal_queue_items
+		WHERE workspace_id = $1::uuid AND assignee_id = $2::uuid
+		ORDER BY created_at
+	`, workspaceID, assigneeID)
+	if err != nil {
+		return nil, fmt.Errorf("hive: list personal queue items: %w", err)
+	}
+	defer rows.Close()
+
+	var items []PersonalQueueItem
+	for rows.Next() {
+		var it PersonalQueueItem
+		if err := rows.Scan(&it.ID, &it.WorkspaceID, &it.AssigneeID, &it.RefKind, &it.RefID, &it.Title, &it.Status, &it.Meta); err != nil {
+			return nil, fmt.Errorf("hive: scan personal queue item: %w", err)
+		}
+		items = append(items, it)
+	}
+	return items, rows.Err()
+}
+
+// CreatePersonalQueueItem inserts a new queue item for the given assignee.
+func (s *Store) CreatePersonalQueueItem(ctx context.Context, workspaceID, assigneeID, refKind, refID, title string, meta []byte) (PersonalQueueItem, error) {
+	if meta == nil {
+		meta = []byte("{}")
+	}
+	var it PersonalQueueItem
+	err := s.pool.QueryRow(ctx, `
+		INSERT INTO hive.personal_queue_items (workspace_id, assignee_id, ref_kind, ref_id, title, meta)
+		VALUES ($1::uuid, $2::uuid, $3, $4, $5, $6::jsonb)
+		RETURNING id::text, workspace_id::text, assignee_id::text, ref_kind, ref_id, title, status, meta
+	`, workspaceID, assigneeID, refKind, refID, title, meta).Scan(
+		&it.ID, &it.WorkspaceID, &it.AssigneeID, &it.RefKind, &it.RefID, &it.Title, &it.Status, &it.Meta,
+	)
+	if err != nil {
+		return PersonalQueueItem{}, fmt.Errorf("hive: create personal queue item: %w", err)
+	}
+	return it, nil
+}
+
+// UpdatePersonalQueueItem updates status and meta on an existing item.
+// The assigneeID predicate enforces that only the item's owner may update it —
+// the UPDATE matches zero rows if assignee_id differs, returning pgx.ErrNoRows.
+func (s *Store) UpdatePersonalQueueItem(ctx context.Context, id, assigneeID, status string, meta []byte) (PersonalQueueItem, error) {
+	if meta == nil {
+		meta = []byte("{}")
+	}
+	var it PersonalQueueItem
+	err := s.pool.QueryRow(ctx, `
+		UPDATE hive.personal_queue_items
+		SET status = $3, meta = $4::jsonb, updated_at = now()
+		WHERE id = $1::uuid AND assignee_id = $2::uuid
+		RETURNING id::text, workspace_id::text, assignee_id::text, ref_kind, ref_id, title, status, meta
+	`, id, assigneeID, status, meta).Scan(
+		&it.ID, &it.WorkspaceID, &it.AssigneeID, &it.RefKind, &it.RefID, &it.Title, &it.Status, &it.Meta,
+	)
+	if err != nil {
+		if err == pgx.ErrNoRows {
+			return PersonalQueueItem{}, fmt.Errorf("hive: personal queue item %s: not found or not authorized", id)
+		}
+		return PersonalQueueItem{}, fmt.Errorf("hive: update personal queue item %s: %w", id, err)
+	}
+	return it, nil
+}
+
 // CreateReviewGate inserts a new gate row (upsert on workspace+epic+key).
 func (s *Store) CreateReviewGate(ctx context.Context, workspaceID, epicID, gateKey, state, updatedBy string, evidence []byte) (ReviewGate, error) {
 	if evidence == nil {
