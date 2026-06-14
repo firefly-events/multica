@@ -1,0 +1,22 @@
+{
+  "name": "@multica/hive",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./index.tsx"
+  },
+  "dependencies": {
+    "@multica/core": "workspace:*",
+    "@multica/ui": "workspace:*"
+  },
+  "peerDependencies": {
+    "@tanstack/react-query": "catalog:",
+    "react": "catalog:"
+  },
+  "devDependencies": {
+    "@multica/tsconfig": "workspace:*",
+    "@types/react": "catalog:",
+    "typescript": "catalog:"
+  }
+}
