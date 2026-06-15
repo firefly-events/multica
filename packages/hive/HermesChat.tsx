@@ -82,21 +82,22 @@ export function HermesChat() {
     isError: msgsError,
   } = useInfiniteQuery({
     queryKey: ["hive", "hermes-messages", wsId, activeThreadId ?? ""] as const,
-    queryFn: ({ pageParam }: { pageParam: string | undefined }) => {
-      const beforeParam = pageParam
-        ? `&before=${encodeURIComponent(pageParam)}`
+    queryFn: ({ pageParam }: { pageParam: { before: string; before_id: string } | undefined }) => {
+      const cursorParams = pageParam
+        ? `&before=${encodeURIComponent(pageParam.before)}&before_id=${encodeURIComponent(pageParam.before_id)}`
         : "";
       return hiveRequest(
-        `/hermes-messages?thread_id=${encodeURIComponent(activeThreadId ?? "")}&workspace_id=${encodeURIComponent(wsId)}&limit=${PAGE_LIMIT}${beforeParam}`,
+        `/hermes-messages?thread_id=${encodeURIComponent(activeThreadId ?? "")}&workspace_id=${encodeURIComponent(wsId)}&limit=${PAGE_LIMIT}${cursorParams}`,
         wsId,
       ) as Promise<HermesMessage[]>;
     },
     getNextPageParam: (lastPage: HermesMessage[]) => {
       if (lastPage.length < PAGE_LIMIT) return undefined;
       const last = lastPage[lastPage.length - 1];
-      return last?.CreatedAt;
+      if (!last) return undefined;
+      return { before: last.CreatedAt, before_id: last.ID };
     },
-    initialPageParam: undefined as string | undefined,
+    initialPageParam: undefined as { before: string; before_id: string } | undefined,
     enabled: !!wsId && !!activeThreadId,
   });
 

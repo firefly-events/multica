@@ -441,6 +441,10 @@ func handleListMessages(store *Store) http.HandlerFunc {
 		}
 		beforeTS := r.URL.Query().Get("before")
 		beforeID := r.URL.Query().Get("before_id")
+		if (beforeTS == "") != (beforeID == "") {
+			http.Error(w, `{"error":"before and before_id must be provided together"}`, http.StatusBadRequest)
+			return
+		}
 		limit := 30
 		if ls := r.URL.Query().Get("limit"); ls != "" {
 			if n, err := strconv.Atoi(ls); err == nil && n > 0 {
