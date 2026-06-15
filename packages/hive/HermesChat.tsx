@@ -11,6 +11,8 @@ import {
 import { useCurrentWorkspace } from "@multica/core/paths";
 import { useAuthStore } from "@multica/core/auth";
 import { useWSEvent } from "@multica/core/realtime";
+import { hiveRequest } from "./hiveRequest";
+import { HiveHeader } from "./HiveHeader";
 
 interface HermesThread {
   ID: string;
@@ -32,20 +34,6 @@ interface HermesMessage {
 interface MessageCreatedPayload {
   thread_id: string;
   message: HermesMessage;
-}
-
-async function hiveRequest(path: string, wsId: string, options?: RequestInit) {
-  const res = await fetch(`/api/plugins/hive${path}`, {
-    credentials: "include",
-    headers: {
-      "Content-Type": "application/json",
-      "X-Workspace-ID": wsId,
-      ...options?.headers,
-    },
-    ...options,
-  });
-  if (!res.ok) throw new Error(`hive ${path} ${res.status}`);
-  return res.json();
 }
 
 const PAGE_LIMIT = 30;
@@ -122,6 +110,7 @@ export function HermesChat() {
         (old: InfiniteData<HermesMessage[]> | undefined) => {
           if (!old || old.pages.length === 0) return old;
           const firstPage = old.pages[0] ?? [];
+          if (firstPage.some((m) => m.ID === p.message.ID)) return old;
           return {
             ...old,
             pages: [[p.message, ...firstPage], ...old.pages.slice(1)],
@@ -159,8 +148,20 @@ export function HermesChat() {
           body: text,
         }),
       }),
-    onSuccess: () => {
+    onSuccess: (msg: HermesMessage) => {
       setBody("");
+      // Echo the sent message immediately rather than waiting on the WS
+      // broadcast (which may be delayed or dropped). The WS handler dedupes
+      // by ID so the same message is not appended twice.
+      queryClient.setQueryData(
+        ["hive", "hermes-messages", wsId, activeThreadId ?? ""],
+        (old: InfiniteData<HermesMessage[]> | undefined) => {
+          if (!old || old.pages.length === 0) return old;
+          const firstPage = old.pages[0] ?? [];
+          if (firstPage.some((m) => m.ID === msg.ID)) return old;
+          return { ...old, pages: [[msg, ...firstPage], ...old.pages.slice(1)] };
+        },
+      );
     },
   });
 
@@ -186,7 +187,9 @@ export function HermesChat() {
   const activeThread = threads.find((t) => t.ID === activeThreadId);
 
   return (
-    <div className="flex h-full min-h-0">
+    <div className="flex h-full flex-col">
+      <HiveHeader title="Hermes" />
+      <div className="flex min-h-0 flex-1">
       {/* Thread list */}
       <aside className="flex w-60 shrink-0 flex-col border-r">
         <div className="flex items-center justify-between border-b px-4 py-3">
@@ -330,6 +333,7 @@ export function HermesChat() {
             </form>
           </>
         )}
+      </div>
       </div>
     </div>
   );

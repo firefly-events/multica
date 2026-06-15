@@ -24,7 +24,7 @@ func Router(store *Store, hub realtime.Broadcaster) chi.Router {
 	r := chi.NewRouter()
 
 	r.Get("/healthz", func(w http.ResponseWriter, _ *http.Request) {
-		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "status": "ok"})
 	})
 
 	r.Post("/epic-nodes", handleCreateEpicNode(store))

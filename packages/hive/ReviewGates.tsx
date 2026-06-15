@@ -3,6 +3,8 @@
 import React, { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useCurrentWorkspace } from "@multica/core/paths";
+import { hiveRequest } from "./hiveRequest";
+import { HiveHeader } from "./HiveHeader";
 
 interface ReviewGate {
   ID: string;
@@ -27,20 +29,6 @@ const STATE_CLASSES: Record<string, string> = {
   approved: "text-green-600 dark:text-green-400",
   rejected: "text-destructive",
 };
-
-async function hiveRequest(path: string, wsId: string, options?: RequestInit) {
-  const res = await fetch(`/api/plugins/hive${path}`, {
-    credentials: "include",
-    headers: {
-      "Content-Type": "application/json",
-      "X-Workspace-ID": wsId,
-      ...options?.headers,
-    },
-    ...options,
-  });
-  if (!res.ok) throw new Error(`hive ${path} ${res.status}`);
-  return res.json();
-}
 
 export function ReviewGates({ epicId }: { epicId?: string }) {
   const workspace = useCurrentWorkspace();
@@ -74,7 +62,9 @@ export function ReviewGates({ epicId }: { epicId?: string }) {
   });
 
   return (
-    <div className="flex flex-col gap-6 p-6">
+    <div className="flex h-full flex-col">
+      <HiveHeader title="Review Gates" />
+      <div className="flex flex-1 flex-col gap-6 overflow-y-auto p-6">
       <h1 className="text-xl font-semibold">Review Gates</h1>
 
       <form
@@ -129,6 +119,7 @@ export function ReviewGates({ epicId }: { epicId?: string }) {
           )}
         </>
       )}
+      </div>
     </div>
   );
 }

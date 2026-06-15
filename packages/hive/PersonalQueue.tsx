@@ -3,6 +3,8 @@
 import React from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useCurrentWorkspace } from "@multica/core/paths";
+import { hiveRequest } from "./hiveRequest";
+import { HiveHeader } from "./HiveHeader";
 
 interface PersonalQueueItem {
   ID: string;
@@ -28,20 +30,6 @@ const STATUS_CLASSES: Record<string, string> = {
   in_progress: "text-blue-600 dark:text-blue-400",
   done: "text-green-600 dark:text-green-400",
 };
-
-async function hiveRequest(path: string, wsId: string, options?: RequestInit) {
-  const res = await fetch(`/api/plugins/hive${path}`, {
-    credentials: "include",
-    headers: {
-      "Content-Type": "application/json",
-      "X-Workspace-ID": wsId,
-      ...options?.headers,
-    },
-    ...options,
-  });
-  if (!res.ok) throw new Error(`hive ${path} ${res.status}`);
-  return res.json();
-}
 
 export function PersonalQueue() {
   const workspace = useCurrentWorkspace();
@@ -72,7 +60,9 @@ export function PersonalQueue() {
   });
 
   return (
-    <div className="flex flex-col gap-6 p-6">
+    <div className="flex h-full flex-col">
+      <HiveHeader title="My Queue" />
+      <div className="flex flex-1 flex-col gap-6 overflow-y-auto p-6">
       <h1 className="text-xl font-semibold">My Queue</h1>
 
       {isPending && (
@@ -102,6 +92,7 @@ export function PersonalQueue() {
           )}
         </>
       )}
+      </div>
     </div>
   );
 }
