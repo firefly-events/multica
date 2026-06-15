@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>events.firefly.multica.postgres</string>
+  <key>ProgramArguments</key>
+  <array><string>/bin/bash</string><string>/Users/hive/Code/spikes/multica/scripts/studio/ensure-db.sh</string></array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><false/>
+  <key>StandardOutPath</key><string>/tmp/events.firefly.multica.postgres.out.log</string>
+  <key>StandardErrorPath</key><string>/tmp/events.firefly.multica.postgres.err.log</string>
+  <key>EnvironmentVariables</key><dict><key>PATH</key><string>/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string></dict>
+</dict>
+</plist>
