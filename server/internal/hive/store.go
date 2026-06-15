@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -52,14 +53,14 @@ func (s *Store) CreateEpicNode(ctx context.Context, workspaceID, epicID, kind st
 	return node, nil
 }
 
-// GetEpicNode fetches one row from hive.epic_nodes by UUID.
-func (s *Store) GetEpicNode(ctx context.Context, id string) (EpicNode, error) {
+// GetEpicNode fetches one row from hive.epic_nodes by UUID, scoped to workspaceID.
+func (s *Store) GetEpicNode(ctx context.Context, workspaceID, id string) (EpicNode, error) {
 	var node EpicNode
 	err := s.pool.QueryRow(ctx, `
 		SELECT id::text, workspace_id::text, epic_id, kind, payload
 		FROM hive.epic_nodes
-		WHERE id = $1::uuid
-	`, id).Scan(
+		WHERE id = $1::uuid AND workspace_id = $2::uuid
+	`, id, workspaceID).Scan(
 		&node.ID, &node.WorkspaceID, &node.EpicID, &node.Kind, &node.Payload,
 	)
 	if err != nil {
@@ -103,32 +104,33 @@ func (s *Store) ListReviewGates(ctx context.Context, workspaceID, epicID string)
 	return gates, rows.Err()
 }
 
-// GetReviewGate fetches one row from hive.review_gates by UUID.
-func (s *Store) GetReviewGate(ctx context.Context, id string) (ReviewGate, error) {
+// GetReviewGate fetches one row from hive.review_gates by UUID, scoped to workspaceID.
+func (s *Store) GetReviewGate(ctx context.Context, workspaceID, id string) (ReviewGate, error) {
 	var g ReviewGate
 	err := s.pool.QueryRow(ctx, `
 		SELECT id::text, workspace_id::text, epic_id, gate_key, state, evidence, updated_by
 		FROM hive.review_gates
-		WHERE id = $1::uuid
-	`, id).Scan(&g.ID, &g.WorkspaceID, &g.EpicID, &g.GateKey, &g.State, &g.Evidence, &g.UpdatedBy)
+		WHERE id = $1::uuid AND workspace_id = $2::uuid
+	`, id, workspaceID).Scan(&g.ID, &g.WorkspaceID, &g.EpicID, &g.GateKey, &g.State, &g.Evidence, &g.UpdatedBy)
 	if err != nil {
 		return ReviewGate{}, fmt.Errorf("hive: get review gate %s: %w", id, err)
 	}
 	return g, nil
 }
 
-// UpdateReviewGate sets state, evidence, and updated_by on an existing gate.
-func (s *Store) UpdateReviewGate(ctx context.Context, id, state, updatedBy string, evidence []byte) (ReviewGate, error) {
+// UpdateReviewGate sets state, evidence, and updated_by on an existing gate,
+// scoped to workspaceID to prevent cross-workspace mutations.
+func (s *Store) UpdateReviewGate(ctx context.Context, workspaceID, id, state, updatedBy string, evidence []byte) (ReviewGate, error) {
 	if evidence == nil {
 		evidence = []byte("{}")
 	}
 	var g ReviewGate
 	err := s.pool.QueryRow(ctx, `
 		UPDATE hive.review_gates
-		SET state = $2, evidence = $3::jsonb, updated_by = $4, updated_at = now()
-		WHERE id = $1::uuid
+		SET state = $3, evidence = $4::jsonb, updated_by = $5, updated_at = now()
+		WHERE id = $1::uuid AND workspace_id = $2::uuid
 		RETURNING id::text, workspace_id::text, epic_id, gate_key, state, evidence, updated_by
-	`, id, state, evidence, updatedBy).Scan(
+	`, id, workspaceID, state, evidence, updatedBy).Scan(
 		&g.ID, &g.WorkspaceID, &g.EpicID, &g.GateKey, &g.State, &g.Evidence, &g.UpdatedBy,
 	)
 	if err != nil {
@@ -280,10 +282,12 @@ func (s *Store) CreateThread(ctx context.Context, workspaceID, title, createdBy 
 	return t, nil
 }
 
-// ListMessages returns up to limit messages for a thread in DESC order (newest first).
-// If before is non-empty it is used as a created_at upper-bound (exclusive) for pagination.
-// limit is clamped to 100.
-func (s *Store) ListMessages(ctx context.Context, threadID, before string, limit int) ([]HermesMessage, error) {
+// ListMessages returns up to limit messages for a thread in DESC order (newest first),
+// scoped to workspaceID to prevent cross-workspace reads. beforeTS and beforeID form
+// a tuple cursor — both must be non-empty to activate — using
+// (created_at, id) < (beforeTS, beforeID) for deterministic pagination that
+// handles ties on created_at. limit is clamped to 100.
+func (s *Store) ListMessages(ctx context.Context, workspaceID, threadID, beforeTS, beforeID string, limit int) ([]HermesMessage, error) {
 	if limit <= 0 || limit > 100 {
 		limit = 30
 	}
@@ -291,22 +295,25 @@ func (s *Store) ListMessages(ctx context.Context, threadID, before string, limit
 	var rows pgx.Rows
 	var qErr error
 
-	if before != "" {
+	if beforeTS != "" && beforeID != "" {
 		rows, qErr = s.pool.Query(ctx, `
 			SELECT id::text, thread_id::text, workspace_id::text, author_id, body, created_at::text
 			FROM hive.hermes_messages
-			WHERE thread_id = $1::uuid AND created_at < $2::timestamptz
-			ORDER BY created_at DESC
-			LIMIT $3
-		`, threadID, before, limit)
+			WHERE thread_id = $1::uuid
+			  AND workspace_id = $2::uuid
+			  AND (created_at, id) < ($3::timestamptz, $4::uuid)
+			ORDER BY created_at DESC, id DESC
+			LIMIT $5
+		`, threadID, workspaceID, beforeTS, beforeID, limit)
 	} else {
 		rows, qErr = s.pool.Query(ctx, `
 			SELECT id::text, thread_id::text, workspace_id::text, author_id, body, created_at::text
 			FROM hive.hermes_messages
 			WHERE thread_id = $1::uuid
-			ORDER BY created_at DESC
-			LIMIT $2
-		`, threadID, limit)
+			  AND workspace_id = $2::uuid
+			ORDER BY created_at DESC, id DESC
+			LIMIT $3
+		`, threadID, workspaceID, limit)
 	}
 	if qErr != nil {
 		return nil, fmt.Errorf("hive: list messages: %w", qErr)
@@ -324,17 +331,29 @@ func (s *Store) ListMessages(ctx context.Context, threadID, before string, limit
 	return msgs, rows.Err()
 }
 
-// CreateMessage inserts a new message into a thread.
-func (s *Store) CreateMessage(ctx context.Context, threadID, workspaceID, authorID, body string) (HermesMessage, error) {
+// ErrThreadNotInWorkspace is returned when the target thread does not belong
+// to the caller's workspace, preventing cross-workspace message insertion.
+var ErrThreadNotInWorkspace = errors.New("hive: thread not found in workspace")
+
+// CreateMessage inserts a new message into a thread. It atomically verifies that
+// the thread belongs to workspaceID before inserting, preventing cross-workspace writes.
+func (s *Store) CreateMessage(ctx context.Context, workspaceID, threadID, authorID, body string) (HermesMessage, error) {
 	var m HermesMessage
+	// The INSERT selects workspace_id directly from hermes_threads scoped by both
+	// thread id and workspace, so a thread in another workspace returns zero rows.
 	err := s.pool.QueryRow(ctx, `
 		INSERT INTO hive.hermes_messages (thread_id, workspace_id, author_id, body)
-		VALUES ($1::uuid, $2::uuid, $3, $4)
+		SELECT $1::uuid, t.workspace_id, $3, $4
+		FROM hive.hermes_threads t
+		WHERE t.id = $1::uuid AND t.workspace_id = $2::uuid
 		RETURNING id::text, thread_id::text, workspace_id::text, author_id, body, created_at::text
 	`, threadID, workspaceID, authorID, body).Scan(
 		&m.ID, &m.ThreadID, &m.WorkspaceID, &m.AuthorID, &m.Body, &m.CreatedAt,
 	)
 	if err != nil {
+		if err == pgx.ErrNoRows {
+			return HermesMessage{}, ErrThreadNotInWorkspace
+		}
 		return HermesMessage{}, fmt.Errorf("hive: create message: %w", err)
 	}
 	return m, nil
@@ -413,12 +432,20 @@ type MaterializeCatalogSkillParams struct {
 	Overwrite      bool
 }
 
+// isUniqueViolation returns true when err is a PostgreSQL unique-constraint
+// violation (SQLSTATE 23505).
+func isUniqueViolation(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "23505"
+}
+
 // MaterializeCatalogSkill materializes a catalog skill into Multica's native
 // public.skill + public.skill_file rows and records provenance in
 // hive.plugin_skill_catalog_materializations, all within one transaction.
 //
 // Name collision (workspace_id, name) in public.skill returns
-// ErrCatalogSkillCollision unless Overwrite is true.
+// ErrCatalogSkillCollision unless Overwrite is true. ON CONFLICT is used for the
+// skill INSERT so concurrent callers never race into a 500 on unique violation.
 func (s *Store) MaterializeCatalogSkill(ctx context.Context, p MaterializeCatalogSkillParams) (CatalogMaterialization, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -426,64 +453,48 @@ func (s *Store) MaterializeCatalogSkill(ctx context.Context, p MaterializeCatalo
 	}
 	defer tx.Rollback(ctx)
 
-	// Collision check: (workspace_id, name) unique on public.skill.
-	var existingSkillID string
-	cerr := tx.QueryRow(ctx, `
-		SELECT id::text FROM skill
-		WHERE workspace_id = $1::uuid AND name = $2
-		LIMIT 1
-	`, p.WorkspaceID, p.SkillName).Scan(&existingSkillID)
-	if cerr != nil && !errors.Is(cerr, pgx.ErrNoRows) {
-		return CatalogMaterialization{}, fmt.Errorf("hive: materialize catalog skill: check collision: %w", cerr)
-	}
-
-	collision := existingSkillID != ""
-	if collision && !p.Overwrite {
-		return CatalogMaterialization{}, ErrCatalogSkillCollision
-	}
-
-	// Validate the SKILL.md path we'll use for the skill_file row.
 	if !isValidFilePath("SKILL.md") {
 		return CatalogMaterialization{}, fmt.Errorf("hive: materialize catalog skill: invalid file path")
 	}
 
 	var skillID string
-	if collision {
-		err = tx.QueryRow(ctx, `
-			UPDATE skill
-			SET description = $2, content = $3, config = $4::jsonb, updated_at = now()
-			WHERE id = $1::uuid
-			RETURNING id::text
-		`, existingSkillID, p.Description, p.Content, p.Config).Scan(&skillID)
-		if err != nil {
-			return CatalogMaterialization{}, fmt.Errorf("hive: materialize catalog skill: update skill: %w", err)
-		}
-		// Overwrite the SKILL.md skill_file.
-		_, err = tx.Exec(ctx, `
-			INSERT INTO skill_file (skill_id, path, content)
-			VALUES ($1::uuid, 'SKILL.md', $2)
-			ON CONFLICT (skill_id, path) DO UPDATE
-				SET content = EXCLUDED.content, updated_at = now()
-		`, skillID, p.Content)
-		if err != nil {
-			return CatalogMaterialization{}, fmt.Errorf("hive: materialize catalog skill: upsert skill_file: %w", err)
-		}
-	} else {
+	if p.Overwrite {
+		// Upsert: insert or update on name collision.
 		err = tx.QueryRow(ctx, `
 			INSERT INTO skill (workspace_id, name, description, content, config, created_by)
 			VALUES ($1::uuid, $2, $3, $4, $5::jsonb, NULLIF($6, '')::uuid)
+			ON CONFLICT (workspace_id, name) DO UPDATE
+				SET description = EXCLUDED.description,
+				    content     = EXCLUDED.content,
+				    config      = EXCLUDED.config,
+				    updated_at  = now()
 			RETURNING id::text
 		`, p.WorkspaceID, p.SkillName, p.Description, p.Content, p.Config, p.MaterializedBy).Scan(&skillID)
-		if err != nil {
-			return CatalogMaterialization{}, fmt.Errorf("hive: materialize catalog skill: insert skill: %w", err)
+	} else {
+		// Insert only; DO NOTHING on collision → ErrNoRows → 409.
+		err = tx.QueryRow(ctx, `
+			INSERT INTO skill (workspace_id, name, description, content, config, created_by)
+			VALUES ($1::uuid, $2, $3, $4, $5::jsonb, NULLIF($6, '')::uuid)
+			ON CONFLICT (workspace_id, name) DO NOTHING
+			RETURNING id::text
+		`, p.WorkspaceID, p.SkillName, p.Description, p.Content, p.Config, p.MaterializedBy).Scan(&skillID)
+		if err == pgx.ErrNoRows || isUniqueViolation(err) {
+			return CatalogMaterialization{}, ErrCatalogSkillCollision
 		}
-		_, err = tx.Exec(ctx, `
-			INSERT INTO skill_file (skill_id, path, content)
-			VALUES ($1::uuid, 'SKILL.md', $2)
-		`, skillID, p.Content)
-		if err != nil {
-			return CatalogMaterialization{}, fmt.Errorf("hive: materialize catalog skill: insert skill_file: %w", err)
-		}
+	}
+	if err != nil {
+		return CatalogMaterialization{}, fmt.Errorf("hive: materialize catalog skill: upsert skill: %w", err)
+	}
+
+	// Upsert the SKILL.md file (works for both insert and overwrite paths).
+	_, err = tx.Exec(ctx, `
+		INSERT INTO skill_file (skill_id, path, content)
+		VALUES ($1::uuid, 'SKILL.md', $2)
+		ON CONFLICT (skill_id, path) DO UPDATE
+			SET content = EXCLUDED.content, updated_at = now()
+	`, skillID, p.Content)
+	if err != nil {
+		return CatalogMaterialization{}, fmt.Errorf("hive: materialize catalog skill: upsert skill_file: %w", err)
 	}
 
 	// Upsert provenance in hive schema.

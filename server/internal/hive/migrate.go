@@ -58,14 +58,25 @@ func RunMigrations(ctx context.Context, pool *pgxpool.Pool) error {
 			return fmt.Errorf("hive migrate: read %s: %w", name, err)
 		}
 
-		if _, err := pool.Exec(ctx, string(sql)); err != nil {
+		// Run DDL and ledger insert in one transaction so a crash between them
+		// never leaves the migration runner in an inconsistent replay state.
+		tx, err := pool.Begin(ctx)
+		if err != nil {
+			return fmt.Errorf("hive migrate: begin tx for %s: %w", version, err)
+		}
+		if _, err := tx.Exec(ctx, string(sql)); err != nil {
+			tx.Rollback(ctx)
 			return fmt.Errorf("hive migrate: apply %s: %w", version, err)
 		}
-		if _, err := pool.Exec(ctx,
+		if _, err := tx.Exec(ctx,
 			`INSERT INTO hive.schema_migrations (version) VALUES ($1)`,
 			version,
 		); err != nil {
+			tx.Rollback(ctx)
 			return fmt.Errorf("hive migrate: record %s: %w", version, err)
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return fmt.Errorf("hive migrate: commit %s: %w", version, err)
 		}
 		slog.Info("hive migrate: applied", "version", version)
 	}

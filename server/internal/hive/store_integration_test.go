@@ -75,7 +75,7 @@ func TestEpicNodeRoundTrip(t *testing.T) {
 		t.Fatal("CreateEpicNode: empty ID returned")
 	}
 
-	fetched, err := store.GetEpicNode(ctx, created.ID)
+	fetched, err := store.GetEpicNode(ctx, workspaceID, created.ID)
 	if err != nil {
 		t.Fatalf("GetEpicNode(%q): %v", created.ID, err)
 	}
@@ -134,7 +134,7 @@ func TestHermesThreadMessageRoundTrip(t *testing.T) {
 	}
 
 	// Create messages
-	msg1, err := store.CreateMessage(ctx, thread.ID, workspaceID, "user-1", "Hello")
+	msg1, err := store.CreateMessage(ctx, workspaceID, thread.ID, "user-1", "Hello")
 	if err != nil {
 		t.Fatalf("CreateMessage(1): %v", err)
 	}
@@ -145,13 +145,13 @@ func TestHermesThreadMessageRoundTrip(t *testing.T) {
 		t.Errorf("Body: got %q want %q", msg1.Body, "Hello")
 	}
 
-	msg2, err := store.CreateMessage(ctx, thread.ID, workspaceID, "user-2", "World")
+	msg2, err := store.CreateMessage(ctx, workspaceID, thread.ID, "user-2", "World")
 	if err != nil {
 		t.Fatalf("CreateMessage(2): %v", err)
 	}
 
 	// List messages (no cursor)
-	msgs, err := store.ListMessages(ctx, thread.ID, "", 30)
+	msgs, err := store.ListMessages(ctx, workspaceID, thread.ID, "", "", 30)
 	if err != nil {
 		t.Fatalf("ListMessages: %v", err)
 	}
@@ -163,8 +163,8 @@ func TestHermesThreadMessageRoundTrip(t *testing.T) {
 		t.Errorf("ListMessages: expected newest first, got %q", msgs[0].ID)
 	}
 
-	// List messages with before cursor (should exclude msg2)
-	msgsPage, err := store.ListMessages(ctx, thread.ID, msg2.CreatedAt, 30)
+	// List messages with tuple cursor (should exclude msg2)
+	msgsPage, err := store.ListMessages(ctx, workspaceID, thread.ID, msg2.CreatedAt, msg2.ID, 30)
 	if err != nil {
 		t.Fatalf("ListMessages (before): %v", err)
 	}
@@ -224,7 +224,7 @@ func TestReviewGateRoundTrip(t *testing.T) {
 	}
 
 	// Get
-	fetched, err := store.GetReviewGate(ctx, created.ID)
+	fetched, err := store.GetReviewGate(ctx, workspaceID, created.ID)
 	if err != nil {
 		t.Fatalf("GetReviewGate: %v", err)
 	}
@@ -233,7 +233,7 @@ func TestReviewGateRoundTrip(t *testing.T) {
 	}
 
 	// Update
-	updated, err := store.UpdateReviewGate(ctx, created.ID, "approved", "agent-2", []byte(`{"note":"lgtm"}`))
+	updated, err := store.UpdateReviewGate(ctx, workspaceID, created.ID, "approved", "agent-2", []byte(`{"note":"lgtm"}`))
 	if err != nil {
 		t.Fatalf("UpdateReviewGate: %v", err)
 	}

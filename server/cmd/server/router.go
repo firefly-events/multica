@@ -1149,12 +1149,12 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 				r.Get("/", h.GetNotificationPreferences)
 				r.Put("/", h.UpdateNotificationPreferences)
 			})
-		})
 
-		// Hive plugin routes — build-linked, inherit auth from this group.
-		if opts.HiveStore != nil {
-			r.Mount("/api/plugins/hive", hive.Router(opts.HiveStore, hub))
-		}
+			// Hive plugin routes — workspace membership required.
+			if opts.HiveStore != nil {
+				r.Mount("/api/plugins/hive", hive.Router(opts.HiveStore, hub))
+			}
+		})
 	})
 
 	return r, h

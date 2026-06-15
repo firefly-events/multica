@@ -62,6 +62,7 @@
     "@dnd-kit/utilities": "^3.2.2",
     "@floating-ui/dom": "^1.7.6",
     "@multica/core": "workspace:*",
+    "@multica/hive": "workspace:*",
     "@multica/ui": "workspace:*",
     "@tanstack/react-virtual": "catalog:",
     "@tiptap/core": "^3.22.1",

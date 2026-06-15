@@ -9,14 +9,16 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/multica-ai/multica/server/internal/middleware"
 	"github.com/multica-ai/multica/server/internal/realtime"
 )
 
 // Router returns a chi sub-router for all Hive plugin endpoints.
-// It is mounted under /api/plugins/hive inside the existing authenticated
-// chi group, so it inherits auth middleware — no separate auth here.
+// It is mounted inside the RequireWorkspaceMember group in router.go,
+// so every route requires both authentication and workspace membership.
 // hub is used to publish realtime events; pass nil to disable publishing.
 func Router(store *Store, hub realtime.Broadcaster) chi.Router {
 	r := chi.NewRouter()
@@ -48,6 +50,24 @@ func Router(store *Store, hub realtime.Broadcaster) chi.Router {
 	return r
 }
 
+// trustedWorkspaceID returns the workspace ID from the middleware-injected context.
+// Returns ("", false) when no workspace ID is in context (should not happen under
+// RequireWorkspaceMember, but we guard defensively).
+func trustedWorkspaceID(r *http.Request) (string, bool) {
+	id := middleware.WorkspaceIDFromContext(r.Context())
+	return id, id != ""
+}
+
+// rejectWorkspaceMismatch writes a 403 and returns false when clientID is non-empty
+// and differs from ctxID. Call before using any client-supplied workspace_id.
+func rejectWorkspaceMismatch(w http.ResponseWriter, ctxID, clientID string) bool {
+	if clientID != "" && clientID != ctxID {
+		http.Error(w, `{"error":"workspace_id mismatch"}`, http.StatusForbidden)
+		return false
+	}
+	return true
+}
+
 type createEpicNodeRequest struct {
 	WorkspaceID string          `json:"workspace_id"`
 	EpicID      string          `json:"epic_id"`
@@ -57,13 +77,22 @@ type createEpicNodeRequest struct {
 
 func handleCreateEpicNode(store *Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		wsID, ok := trustedWorkspaceID(r)
+		if !ok {
+			http.Error(w, `{"error":"workspace context missing"}`, http.StatusUnauthorized)
+			return
+		}
+
 		var req createEpicNodeRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			http.Error(w, `{"error":"invalid request body"}`, http.StatusBadRequest)
 			return
 		}
-		if req.WorkspaceID == "" || req.EpicID == "" {
-			http.Error(w, `{"error":"workspace_id and epic_id are required"}`, http.StatusBadRequest)
+		if !rejectWorkspaceMismatch(w, wsID, req.WorkspaceID) {
+			return
+		}
+		if req.EpicID == "" {
+			http.Error(w, `{"error":"epic_id is required"}`, http.StatusBadRequest)
 			return
 		}
 
@@ -72,7 +101,7 @@ func handleCreateEpicNode(store *Store) http.HandlerFunc {
 			payload = []byte("{}")
 		}
 
-		node, err := store.CreateEpicNode(r.Context(), req.WorkspaceID, req.EpicID, req.Kind, payload)
+		node, err := store.CreateEpicNode(r.Context(), wsID, req.EpicID, req.Kind, payload)
 		if err != nil {
 			http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
 			return
@@ -83,13 +112,19 @@ func handleCreateEpicNode(store *Store) http.HandlerFunc {
 
 func handleGetEpicNode(store *Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		wsID, ok := trustedWorkspaceID(r)
+		if !ok {
+			http.Error(w, `{"error":"workspace context missing"}`, http.StatusUnauthorized)
+			return
+		}
+
 		id := chi.URLParam(r, "id")
 		if id == "" {
 			http.Error(w, `{"error":"missing id"}`, http.StatusBadRequest)
 			return
 		}
 
-		node, err := store.GetEpicNode(r.Context(), id)
+		node, err := store.GetEpicNode(r.Context(), wsID, id)
 		if err != nil {
 			http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
 			return
@@ -100,10 +135,18 @@ func handleGetEpicNode(store *Store) http.HandlerFunc {
 
 func handleListReviewGates(store *Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		wsID := r.URL.Query().Get("workspace_id")
+		wsID, ok := trustedWorkspaceID(r)
+		if !ok {
+			http.Error(w, `{"error":"workspace context missing"}`, http.StatusUnauthorized)
+			return
+		}
+
+		if !rejectWorkspaceMismatch(w, wsID, r.URL.Query().Get("workspace_id")) {
+			return
+		}
 		epicID := r.URL.Query().Get("epic_id")
-		if wsID == "" || epicID == "" {
-			http.Error(w, `{"error":"workspace_id and epic_id are required"}`, http.StatusBadRequest)
+		if epicID == "" {
+			http.Error(w, `{"error":"epic_id is required"}`, http.StatusBadRequest)
 			return
 		}
 		gates, err := store.ListReviewGates(r.Context(), wsID, epicID)
@@ -129,17 +172,29 @@ type createReviewGateRequest struct {
 
 func handleCreateReviewGate(store *Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		wsID, ok := trustedWorkspaceID(r)
+		if !ok {
+			http.Error(w, `{"error":"workspace context missing"}`, http.StatusUnauthorized)
+			return
+		}
+
 		var req createReviewGateRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			http.Error(w, `{"error":"invalid request body"}`, http.StatusBadRequest)
 			return
 		}
-		if req.WorkspaceID == "" || req.EpicID == "" || req.GateKey == "" {
-			http.Error(w, `{"error":"workspace_id, epic_id, and gate_key are required"}`, http.StatusBadRequest)
+		if !rejectWorkspaceMismatch(w, wsID, req.WorkspaceID) {
 			return
 		}
+		if req.EpicID == "" || req.GateKey == "" {
+			http.Error(w, `{"error":"epic_id and gate_key are required"}`, http.StatusBadRequest)
+			return
+		}
+
+		// updatedBy comes from the authenticated user, not the request body.
+		updatedBy := r.Header.Get("X-User-ID")
 		evidence := []byte(req.Evidence)
-		gate, err := store.CreateReviewGate(r.Context(), req.WorkspaceID, req.EpicID, req.GateKey, req.State, req.UpdatedBy, evidence)
+		gate, err := store.CreateReviewGate(r.Context(), wsID, req.EpicID, req.GateKey, req.State, updatedBy, evidence)
 		if err != nil {
 			http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
 			return
@@ -150,12 +205,18 @@ func handleCreateReviewGate(store *Store) http.HandlerFunc {
 
 func handleGetReviewGate(store *Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		wsID, ok := trustedWorkspaceID(r)
+		if !ok {
+			http.Error(w, `{"error":"workspace context missing"}`, http.StatusUnauthorized)
+			return
+		}
+
 		id := chi.URLParam(r, "id")
 		if id == "" {
 			http.Error(w, `{"error":"missing id"}`, http.StatusBadRequest)
 			return
 		}
-		gate, err := store.GetReviewGate(r.Context(), id)
+		gate, err := store.GetReviewGate(r.Context(), wsID, id)
 		if err != nil {
 			http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
 			return
@@ -165,13 +226,18 @@ func handleGetReviewGate(store *Store) http.HandlerFunc {
 }
 
 type updateReviewGateRequest struct {
-	State     string          `json:"state"`
-	UpdatedBy string          `json:"updated_by"`
-	Evidence  json.RawMessage `json:"evidence"`
+	State    string          `json:"state"`
+	Evidence json.RawMessage `json:"evidence"`
 }
 
 func handleUpdateReviewGate(store *Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		wsID, ok := trustedWorkspaceID(r)
+		if !ok {
+			http.Error(w, `{"error":"workspace context missing"}`, http.StatusUnauthorized)
+			return
+		}
+
 		id := chi.URLParam(r, "id")
 		if id == "" {
 			http.Error(w, `{"error":"missing id"}`, http.StatusBadRequest)
@@ -186,8 +252,10 @@ func handleUpdateReviewGate(store *Store) http.HandlerFunc {
 			http.Error(w, `{"error":"state is required"}`, http.StatusBadRequest)
 			return
 		}
+
+		updatedBy := r.Header.Get("X-User-ID")
 		evidence := []byte(req.Evidence)
-		gate, err := store.UpdateReviewGate(r.Context(), id, req.State, req.UpdatedBy, evidence)
+		gate, err := store.UpdateReviewGate(r.Context(), wsID, id, req.State, updatedBy, evidence)
 		if err != nil {
 			http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
 			return
@@ -198,9 +266,13 @@ func handleUpdateReviewGate(store *Store) http.HandlerFunc {
 
 func handleListPersonalQueueItems(store *Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		wsID := r.URL.Query().Get("workspace_id")
-		if wsID == "" {
-			http.Error(w, `{"error":"workspace_id is required"}`, http.StatusBadRequest)
+		wsID, ok := trustedWorkspaceID(r)
+		if !ok {
+			http.Error(w, `{"error":"workspace context missing"}`, http.StatusUnauthorized)
+			return
+		}
+
+		if !rejectWorkspaceMismatch(w, wsID, r.URL.Query().Get("workspace_id")) {
 			return
 		}
 		userID := r.Header.Get("X-User-ID")
@@ -230,6 +302,12 @@ type createPersonalQueueItemRequest struct {
 
 func handleCreatePersonalQueueItem(store *Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		wsID, ok := trustedWorkspaceID(r)
+		if !ok {
+			http.Error(w, `{"error":"workspace context missing"}`, http.StatusUnauthorized)
+			return
+		}
+
 		userID := r.Header.Get("X-User-ID")
 		if userID == "" {
 			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
@@ -240,12 +318,11 @@ func handleCreatePersonalQueueItem(store *Store) http.HandlerFunc {
 			http.Error(w, `{"error":"invalid request body"}`, http.StatusBadRequest)
 			return
 		}
-		if req.WorkspaceID == "" {
-			http.Error(w, `{"error":"workspace_id is required"}`, http.StatusBadRequest)
+		if !rejectWorkspaceMismatch(w, wsID, req.WorkspaceID) {
 			return
 		}
 		meta := []byte(req.Meta)
-		item, err := store.CreatePersonalQueueItem(r.Context(), req.WorkspaceID, userID, req.RefKind, req.RefID, req.Title, meta)
+		item, err := store.CreatePersonalQueueItem(r.Context(), wsID, userID, req.RefKind, req.RefID, req.Title, meta)
 		if err != nil {
 			http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
 			return
@@ -292,9 +369,13 @@ func handleUpdatePersonalQueueItem(store *Store) http.HandlerFunc {
 
 func handleListThreads(store *Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		wsID := r.URL.Query().Get("workspace_id")
-		if wsID == "" {
-			http.Error(w, `{"error":"workspace_id is required"}`, http.StatusBadRequest)
+		wsID, ok := trustedWorkspaceID(r)
+		if !ok {
+			http.Error(w, `{"error":"workspace context missing"}`, http.StatusUnauthorized)
+			return
+		}
+
+		if !rejectWorkspaceMismatch(w, wsID, r.URL.Query().Get("workspace_id")) {
 			return
 		}
 		threads, err := store.ListThreads(r.Context(), wsID)
@@ -312,21 +393,28 @@ func handleListThreads(store *Store) http.HandlerFunc {
 type createThreadRequest struct {
 	WorkspaceID string `json:"workspace_id"`
 	Title       string `json:"title"`
-	CreatedBy   string `json:"created_by"`
 }
 
 func handleCreateThread(store *Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		wsID, ok := trustedWorkspaceID(r)
+		if !ok {
+			http.Error(w, `{"error":"workspace context missing"}`, http.StatusUnauthorized)
+			return
+		}
+
 		var req createThreadRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			http.Error(w, `{"error":"invalid request body"}`, http.StatusBadRequest)
 			return
 		}
-		if req.WorkspaceID == "" {
-			http.Error(w, `{"error":"workspace_id is required"}`, http.StatusBadRequest)
+		if !rejectWorkspaceMismatch(w, wsID, req.WorkspaceID) {
 			return
 		}
-		thread, err := store.CreateThread(r.Context(), req.WorkspaceID, req.Title, req.CreatedBy)
+
+		// Derive creator from authenticated user, not request body.
+		createdBy := r.Header.Get("X-User-ID")
+		thread, err := store.CreateThread(r.Context(), wsID, req.Title, createdBy)
 		if err != nil {
 			http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
 			return
@@ -337,20 +425,29 @@ func handleCreateThread(store *Store) http.HandlerFunc {
 
 func handleListMessages(store *Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		threadID := r.URL.Query().Get("thread_id")
-		wsID := r.URL.Query().Get("workspace_id")
-		if threadID == "" || wsID == "" {
-			http.Error(w, `{"error":"thread_id and workspace_id are required"}`, http.StatusBadRequest)
+		wsID, ok := trustedWorkspaceID(r)
+		if !ok {
+			http.Error(w, `{"error":"workspace context missing"}`, http.StatusUnauthorized)
 			return
 		}
-		before := r.URL.Query().Get("before")
+
+		if !rejectWorkspaceMismatch(w, wsID, r.URL.Query().Get("workspace_id")) {
+			return
+		}
+		threadID := r.URL.Query().Get("thread_id")
+		if threadID == "" {
+			http.Error(w, `{"error":"thread_id is required"}`, http.StatusBadRequest)
+			return
+		}
+		beforeTS := r.URL.Query().Get("before")
+		beforeID := r.URL.Query().Get("before_id")
 		limit := 30
 		if ls := r.URL.Query().Get("limit"); ls != "" {
 			if n, err := strconv.Atoi(ls); err == nil && n > 0 {
 				limit = n
 			}
 		}
-		msgs, err := store.ListMessages(r.Context(), threadID, before, limit)
+		msgs, err := store.ListMessages(r.Context(), wsID, threadID, beforeTS, beforeID, limit)
 		if err != nil {
 			http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
 			return
@@ -365,27 +462,42 @@ func handleListMessages(store *Store) http.HandlerFunc {
 type createMessageRequest struct {
 	ThreadID    string `json:"thread_id"`
 	WorkspaceID string `json:"workspace_id"`
-	AuthorID    string `json:"author_id"`
 	Body        string `json:"body"`
 }
 
 func handleCreateMessage(store *Store, hub realtime.Broadcaster) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		wsID, ok := trustedWorkspaceID(r)
+		if !ok {
+			http.Error(w, `{"error":"workspace context missing"}`, http.StatusUnauthorized)
+			return
+		}
+
 		var req createMessageRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			http.Error(w, `{"error":"invalid request body"}`, http.StatusBadRequest)
 			return
 		}
-		if req.ThreadID == "" || req.WorkspaceID == "" {
-			http.Error(w, `{"error":"thread_id and workspace_id are required"}`, http.StatusBadRequest)
+		if !rejectWorkspaceMismatch(w, wsID, req.WorkspaceID) {
+			return
+		}
+		if req.ThreadID == "" {
+			http.Error(w, `{"error":"thread_id is required"}`, http.StatusBadRequest)
 			return
 		}
 		if req.Body == "" {
 			http.Error(w, `{"error":"body is required"}`, http.StatusBadRequest)
 			return
 		}
-		msg, err := store.CreateMessage(r.Context(), req.ThreadID, req.WorkspaceID, req.AuthorID, req.Body)
+
+		// Derive author from authenticated user, not request body.
+		authorID := r.Header.Get("X-User-ID")
+		msg, err := store.CreateMessage(r.Context(), wsID, req.ThreadID, authorID, req.Body)
 		if err != nil {
+			if errors.Is(err, ErrThreadNotInWorkspace) {
+				http.Error(w, `{"error":"thread not found"}`, http.StatusNotFound)
+				return
+			}
 			http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
 			return
 		}
@@ -398,7 +510,7 @@ func handleCreateMessage(store *Store, hub realtime.Broadcaster) http.HandlerFun
 				},
 			}
 			if data, jerr := json.Marshal(event); jerr == nil {
-				hub.BroadcastToWorkspace(req.WorkspaceID, data)
+				hub.BroadcastToWorkspace(wsID, data)
 			}
 		}
 		writeJSON(w, http.StatusCreated, msg)
@@ -418,16 +530,22 @@ type skillCatalogResponse struct {
 func handleGetSkillCatalog(store *Store) http.HandlerFunc {
 	catalog := loadCatalog()
 	return func(w http.ResponseWriter, r *http.Request) {
-		wsID := r.URL.Query().Get("workspace_id")
-		if wsID == "" {
-			http.Error(w, `{"error":"workspace_id is required"}`, http.StatusBadRequest)
+		wsID, ok := trustedWorkspaceID(r)
+		if !ok {
+			http.Error(w, `{"error":"workspace context missing"}`, http.StatusUnauthorized)
 			return
 		}
 
-		// Record browse event asynchronously so it never blocks the response.
-		// Use context.Background() — r.Context() is cancelled after handler returns.
+		if !rejectWorkspaceMismatch(w, wsID, r.URL.Query().Get("workspace_id")) {
+			return
+		}
+
+		// Record browse event asynchronously with a bounded timeout so it never
+		// blocks the response and does not leak goroutines under DB stalls.
 		go func() {
-			_ = store.TouchCatalogBrowse(context.Background(), wsID, catalog.Version)
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_ = store.TouchCatalogBrowse(ctx, wsID, catalog.Version)
 		}()
 
 		state, err := store.GetOrCreateCatalogState(r.Context(), wsID)
@@ -477,13 +595,22 @@ type materializeCatalogSkillRequest struct {
 func handleMaterializeCatalogSkill(store *Store) http.HandlerFunc {
 	catalog := loadCatalog()
 	return func(w http.ResponseWriter, r *http.Request) {
+		wsID, ok := trustedWorkspaceID(r)
+		if !ok {
+			http.Error(w, `{"error":"workspace context missing"}`, http.StatusUnauthorized)
+			return
+		}
+
 		var req materializeCatalogSkillRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			http.Error(w, `{"error":"invalid request body"}`, http.StatusBadRequest)
 			return
 		}
-		if req.WorkspaceID == "" || req.CatalogKey == "" {
-			http.Error(w, `{"error":"workspace_id and catalog_key are required"}`, http.StatusBadRequest)
+		if !rejectWorkspaceMismatch(w, wsID, req.WorkspaceID) {
+			return
+		}
+		if req.CatalogKey == "" {
+			http.Error(w, `{"error":"catalog_key is required"}`, http.StatusBadRequest)
 			return
 		}
 
@@ -511,7 +638,7 @@ func handleMaterializeCatalogSkill(store *Store) http.HandlerFunc {
 		})
 
 		mat, err := store.MaterializeCatalogSkill(r.Context(), MaterializeCatalogSkillParams{
-			WorkspaceID:    req.WorkspaceID,
+			WorkspaceID:    wsID,
 			CatalogKey:     found.Name,
 			CatalogVersion: catalog.Version,
 			SkillName:      found.Name,
