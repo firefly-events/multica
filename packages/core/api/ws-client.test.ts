@@ -3,10 +3,10 @@ import { WSClient } from "./ws-client";
 import type { WSMessage } from "../types/events";
 
 // Capture URL passed to WebSocket so we can assert the connect-time
-// query string.  We don't simulate the full WS lifecycle here — only the
-// upgrade URL construction, which is what carries client identity.
+// query string and drive a minimal lifecycle for connection-state tests.
 class FakeWebSocket {
   static lastUrl: string | null = null;
+  static instances: FakeWebSocket[] = [];
   static lastInstance: FakeWebSocket | null = null;
   // Fields read by WSClient.connect()/disconnect(), all no-op here.
   onopen: (() => void) | null = null;
@@ -14,22 +14,32 @@ class FakeWebSocket {
   onclose: (() => void) | null = null;
   onerror: (() => void) | null = null;
   readyState = 0;
+  sent: string[] = [];
+
   constructor(url: string) {
     FakeWebSocket.lastUrl = url;
+    FakeWebSocket.instances.push(this);
     FakeWebSocket.lastInstance = this;
   }
+
   close() {}
-  send() {}
+
+  send(data: string) {
+    this.sent.push(data);
+  }
 }
 
 describe("WSClient", () => {
   beforeEach(() => {
     FakeWebSocket.lastUrl = null;
+    FakeWebSocket.instances = [];
+    vi.useFakeTimers();
     FakeWebSocket.lastInstance = null;
     vi.stubGlobal("WebSocket", FakeWebSocket as unknown as typeof WebSocket);
   });
 
   afterEach(() => {
+    vi.useRealTimers();
     vi.unstubAllGlobals();
   });
 
@@ -74,6 +84,55 @@ describe("WSClient", () => {
     expect(url.searchParams.has("client_os")).toBe(false);
   });
 
+  it("tracks connection state across connect, auth, close, and disconnect", () => {
+    const ws = new WSClient("ws://example.test/ws");
+    ws.setAuth("tok", "acme");
+
+    expect(ws.getConnectionState()).toBe("disconnected");
+
+    const seen: string[] = [];
+    const unsubscribe = ws.onConnectionStateChange((state) => {
+      seen.push(state);
+    });
+
+    ws.connect();
+    expect(ws.getConnectionState()).toBe("connecting");
+
+    const socket = FakeWebSocket.instances.at(-1)!;
+    socket.onopen?.();
+    expect(socket.sent).toEqual([
+      JSON.stringify({ type: "auth", payload: { token: "tok" } }),
+    ]);
+
+    socket.onmessage?.({ data: JSON.stringify({ type: "auth_ack" }) });
+    expect(ws.getConnectionState()).toBe("connected");
+
+    socket.onclose?.();
+    expect(ws.getConnectionState()).toBe("reconnecting");
+
+    ws.disconnect();
+    expect(ws.getConnectionState()).toBe("disconnected");
+
+    unsubscribe();
+    expect(seen).toEqual([
+      "disconnected",
+      "connecting",
+      "connected",
+      "reconnecting",
+      "disconnected",
+    ]);
+  });
+
+  it("authenticates immediately in cookie mode", () => {
+    const ws = new WSClient("ws://example.test/ws", { cookieAuth: true });
+    ws.setAuth(null, "acme");
+    ws.connect();
+
+    const socket = FakeWebSocket.instances.at(-1)!;
+    socket.onopen?.();
+
+    expect(socket.sent).toEqual([]);
+    expect(ws.getConnectionState()).toBe("connected");
   it("truncates the logged payload when an unparseable frame is large", () => {
     const logger = {
       debug: vi.fn(),

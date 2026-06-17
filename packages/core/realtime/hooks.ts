@@ -31,3 +31,8 @@ export function useWSReconnect(callback: () => void) {
     return unsub;
   }, [callback, onReconnect]);
 }
+
+export function useWSStatus() {
+  const { connectionState } = useWS();
+  return connectionState;
+}

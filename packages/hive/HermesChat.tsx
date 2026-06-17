@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useCallback, useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   useQuery,
   useMutation,
@@ -10,7 +10,11 @@ import {
 } from "@tanstack/react-query";
 import { useCurrentWorkspace } from "@multica/core/paths";
 import { useAuthStore } from "@multica/core/auth";
-import { useWSEvent } from "@multica/core/realtime";
+import {
+  useWSEvent,
+  useWSReconnect,
+  useWSStatus,
+} from "@multica/core/realtime";
 import { hiveRequest } from "./hiveRequest";
 import { HiveHeader } from "./HiveHeader";
 
@@ -36,18 +40,56 @@ interface MessageCreatedPayload {
   message: HermesMessage;
 }
 
+interface HermesBridgeStatus {
+  bridge: {
+    connected: boolean;
+    stale: boolean;
+    updated_at?: string;
+    last_heartbeat_at?: string;
+    last_event_at?: string;
+    last_connect_at?: string;
+    last_error?: string;
+  };
+  thread: {
+    state: string;
+    message_id?: string;
+    started_at?: string;
+    updated_at?: string;
+    error?: string;
+  };
+}
+
 const PAGE_LIMIT = 30;
+const ACTIVE_REPLY_THREAD_STATES = new Set(["running", "posting"]);
+
+function upsertMessagePage(
+  old: InfiniteData<HermesMessage[]> | undefined,
+  message: HermesMessage,
+): InfiniteData<HermesMessage[]> {
+  if (!old || old.pages.length === 0) {
+    return { pages: [[message]], pageParams: [undefined] };
+  }
+  const firstPage = old.pages[0] ?? [];
+  if (firstPage.some((m) => m.ID === message.ID)) return old;
+  return {
+    ...old,
+    pages: [[message, ...firstPage], ...old.pages.slice(1)],
+  };
+}
 
 export function HermesChat() {
   const workspace = useCurrentWorkspace();
   const wsId = workspace?.id ?? "";
   const userId = useAuthStore((s) => s.user?.id ?? "");
   const [activeThreadId, setActiveThreadId] = useState<string | null>(null);
+  const [awaitingReplySince, setAwaitingReplySince] = useState<string | null>(null);
   const [newThreadTitle, setNewThreadTitle] = useState("");
   const [creating, setCreating] = useState(false);
   const [body, setBody] = useState("");
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const lastBridgeThreadStatusRef = useRef<string | null>(null);
   const queryClient = useQueryClient();
+  const wsStatus = useWSStatus();
 
   const { data: threads = [], isError: threadsError } = useQuery<HermesThread[]>({
     queryKey: ["hive", "hermes-threads", wsId],
@@ -87,10 +129,28 @@ export function HermesChat() {
     },
     initialPageParam: undefined as { before: string; before_id: string } | undefined,
     enabled: !!wsId && !!activeThreadId,
+    refetchInterval: activeThreadId
+      ? awaitingReplySince || wsStatus !== "connected"
+        ? 1000
+        : 3000
+      : false,
+    refetchIntervalInBackground: true,
+  });
+
+  const { data: bridgeStatus } = useQuery<HermesBridgeStatus>({
+    queryKey: ["hive", "hermes-bridge-status", wsId, activeThreadId ?? ""],
+    queryFn: () =>
+      hiveRequest(
+        `/hermes-bridge-status?thread_id=${encodeURIComponent(activeThreadId ?? "")}&workspace_id=${encodeURIComponent(wsId)}`,
+        wsId,
+      ),
+    enabled: !!wsId && !!activeThreadId,
+    refetchInterval: activeThreadId ? 1500 : false,
+    refetchIntervalInBackground: true,
   });
 
   // Pages arrive newest-first. Reverse page order and each page to display oldest at top.
-  const messages = React.useMemo<HermesMessage[]>(() => {
+  const messages = useMemo<HermesMessage[]>(() => {
     if (!msgData) return [];
     return [...msgData.pages]
       .reverse()
@@ -101,27 +161,49 @@ export function HermesChat() {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages.length]);
 
+  useEffect(() => {
+    if (!awaitingReplySince) return;
+    const awaitingSince = Date.parse(awaitingReplySince);
+    if (Number.isNaN(awaitingSince)) return;
+    const replySeen = messages.some((msg) => {
+      if (msg.AuthorID === userId) return false;
+      const createdAt = Date.parse(msg.CreatedAt);
+      return !Number.isNaN(createdAt) && createdAt >= awaitingSince;
+    });
+    if (replySeen) setAwaitingReplySince(null);
+  }, [awaitingReplySince, messages, userId]);
+
+  useEffect(() => {
+    lastBridgeThreadStatusRef.current = null;
+  }, [activeThreadId]);
+
   const handleMessageCreated = useCallback(
     (payload: unknown) => {
       const p = payload as MessageCreatedPayload;
       if (p.thread_id !== activeThreadId) return;
       queryClient.setQueryData(
         ["hive", "hermes-messages", wsId, activeThreadId ?? ""],
-        (old: InfiniteData<HermesMessage[]> | undefined) => {
-          if (!old || old.pages.length === 0) return old;
-          const firstPage = old.pages[0] ?? [];
-          if (firstPage.some((m) => m.ID === p.message.ID)) return old;
-          return {
-            ...old,
-            pages: [[p.message, ...firstPage], ...old.pages.slice(1)],
-          };
-        },
+        (old: InfiniteData<HermesMessage[]> | undefined) => upsertMessagePage(old, p.message),
       );
     },
     [activeThreadId, queryClient, wsId],
   );
 
   useWSEvent("hive:message:created", handleMessageCreated);
+
+  useWSReconnect(
+    useCallback(() => {
+      queryClient.invalidateQueries({ queryKey: ["hive", "hermes-threads", wsId] });
+      if (activeThreadId) {
+        queryClient.invalidateQueries({
+          queryKey: ["hive", "hermes-messages", wsId, activeThreadId],
+        });
+        queryClient.invalidateQueries({
+          queryKey: ["hive", "hermes-bridge-status", wsId, activeThreadId],
+        });
+      }
+    }, [activeThreadId, queryClient, wsId]),
+  );
 
   const createThreadMut = useMutation({
     mutationFn: (title: string) =>
@@ -150,17 +232,13 @@ export function HermesChat() {
       }),
     onSuccess: (msg: HermesMessage) => {
       setBody("");
+      setAwaitingReplySince(msg.CreatedAt || new Date().toISOString());
       // Echo the sent message immediately rather than waiting on the WS
       // broadcast (which may be delayed or dropped). The WS handler dedupes
       // by ID so the same message is not appended twice.
       queryClient.setQueryData(
         ["hive", "hermes-messages", wsId, activeThreadId ?? ""],
-        (old: InfiniteData<HermesMessage[]> | undefined) => {
-          if (!old || old.pages.length === 0) return old;
-          const firstPage = old.pages[0] ?? [];
-          if (firstPage.some((m) => m.ID === msg.ID)) return old;
-          return { ...old, pages: [[msg, ...firstPage], ...old.pages.slice(1)] };
-        },
+        (old: InfiniteData<HermesMessage[]> | undefined) => upsertMessagePage(old, msg),
       );
     },
   });
@@ -185,6 +263,131 @@ export function HermesChat() {
   };
 
   const activeThread = threads.find((t) => t.ID === activeThreadId);
+  const latestMessage = messages[messages.length - 1];
+  const latestMessageFromUser = latestMessage?.AuthorID === userId;
+  const bridgeHealthy = !!bridgeStatus?.bridge.connected && !bridgeStatus?.bridge.stale;
+  const wsConnected = wsStatus === "connected";
+  const threadState = bridgeStatus?.thread.state ?? "unknown";
+  const bridgeThreadUpdatedAt = bridgeStatus?.thread.updated_at ?? "";
+  const bridgeThreadMessageId = bridgeStatus?.thread.message_id ?? "";
+  const bridgeError = bridgeStatus?.thread.error || bridgeStatus?.bridge.last_error;
+
+  useEffect(() => {
+    if (!activeThreadId) return;
+    const bridgeThreadStatusKey = `${threadState}|${bridgeThreadMessageId}|${bridgeThreadUpdatedAt}`;
+    if (!bridgeThreadUpdatedAt || bridgeThreadStatusKey === lastBridgeThreadStatusRef.current) return;
+    lastBridgeThreadStatusRef.current = bridgeThreadStatusKey;
+    if (bridgeThreadMessageId && messages.some((msg) => msg.ID === bridgeThreadMessageId)) return;
+    queryClient.invalidateQueries({
+      queryKey: ["hive", "hermes-messages", wsId, activeThreadId ?? ""],
+    });
+  }, [
+    activeThreadId,
+    bridgeThreadMessageId,
+    bridgeThreadUpdatedAt,
+    messages,
+    queryClient,
+    threadState,
+    wsId,
+  ]);
+
+  const sendErrorText = useMemo(() => {
+    if (!sendMut.isError) return null;
+    const raw = sendMut.error instanceof Error ? sendMut.error.message : "Failed to send message.";
+    if (raw.includes(" 401")) {
+      return "Message failed to send: your Hive session is not authenticated.";
+    }
+    if (raw.includes(" 403")) {
+      return "Message failed to send: CSRF or workspace auth was rejected.";
+    }
+    if (raw.includes(" 400")) {
+      return "Message failed to send: thread context was invalid.";
+    }
+    return `Message failed to send: ${raw}`;
+  }, [sendMut.error, sendMut.isError]);
+
+  const replyStatus = useMemo(() => {
+    if (!activeThreadId) return null;
+    if (sendMut.isPending) {
+      return { tone: "muted", text: "Sending message…" };
+    }
+    if (sendErrorText) {
+      return { tone: "error", text: sendErrorText };
+    }
+    if (ACTIVE_REPLY_THREAD_STATES.has(threadState)) {
+      return { tone: "active", text: "Hermes is replying…" };
+    }
+    if (threadState === "error") {
+      return {
+        tone: "error",
+        text: bridgeError ? `Hermes reply failed: ${bridgeError}` : "Hermes reply failed.",
+      };
+    }
+    if (!bridgeHealthy) {
+      return {
+        tone: "error",
+        text: bridgeError ? `Hermes bridge offline: ${bridgeError}` : "Hermes bridge is offline.",
+      };
+    }
+    if (awaitingReplySince && wsStatus === "reconnecting") {
+      return { tone: "warning", text: "Realtime disconnected. Polling for Hermes updates…" };
+    }
+    if (awaitingReplySince) {
+      return { tone: "warning", text: "Message posted. Waiting for Hermes to pick it up…" };
+    }
+    if (latestMessageFromUser) {
+      return { tone: "warning", text: "Waiting for Hermes to start replying…" };
+    }
+    return null;
+  }, [
+    activeThreadId,
+    awaitingReplySince,
+    bridgeError,
+    bridgeHealthy,
+    latestMessageFromUser,
+    sendErrorText,
+    sendMut.isPending,
+    threadState,
+    wsStatus,
+  ]);
+
+  const bridgeHealth = useMemo(() => {
+    if (threadState === "error") {
+      return { dotClass: "bg-destructive", textClass: "text-destructive", label: "Reply failed" };
+    }
+    if (!bridgeStatus?.bridge.connected) {
+      return { dotClass: "bg-destructive", textClass: "text-destructive", label: "Bridge offline" };
+    }
+    if (bridgeStatus.bridge.stale) {
+      return { dotClass: "bg-warning", textClass: "text-warning", label: "Bridge stale" };
+    }
+    if (wsStatus === "reconnecting") {
+      return { dotClass: "bg-warning animate-pulse", textClass: "text-warning", label: "Realtime reconnecting" };
+    }
+    if (ACTIVE_REPLY_THREAD_STATES.has(threadState)) {
+      return { dotClass: "bg-primary animate-pulse", textClass: "text-primary", label: "Hermes working" };
+    }
+    if (awaitingReplySince || latestMessageFromUser) {
+      return { dotClass: "bg-warning animate-pulse", textClass: "text-warning", label: "Waiting for Hermes" };
+    }
+    if (!wsConnected) {
+      return { dotClass: "bg-muted-foreground/40", textClass: "text-muted-foreground", label: "Realtime offline" };
+    }
+    return { dotClass: "bg-success", textClass: "text-success", label: "Bridge healthy" };
+  }, [
+    awaitingReplySince,
+    bridgeStatus?.bridge.connected,
+    bridgeStatus?.bridge.stale,
+    latestMessageFromUser,
+    threadState,
+    wsConnected,
+    wsStatus,
+  ]);
+
+  const showHermesTypingIndicator =
+    !!activeThreadId &&
+    bridgeHealthy &&
+    (ACTIVE_REPLY_THREAD_STATES.has(threadState) || !!awaitingReplySince || latestMessageFromUser);
 
   return (
     <div className="flex h-full flex-col">
@@ -258,9 +461,15 @@ export function HermesChat() {
         ) : (
           <>
             <header className="border-b px-6 py-3">
-              <h1 className="text-sm font-semibold">
-                {activeThread?.Title ?? "Thread"}
-              </h1>
+              <div className="flex items-center justify-between gap-3">
+                <h1 className="text-sm font-semibold">
+                  {activeThread?.Title ?? "Thread"}
+                </h1>
+                <div className={`inline-flex items-center gap-2 rounded-full border px-2.5 py-1 text-[11px] ${bridgeHealth.textClass}`}>
+                  <span aria-hidden className={`size-2 rounded-full ${bridgeHealth.dotClass}`} />
+                  <span>{bridgeHealth.label}</span>
+                </div>
+              </div>
             </header>
 
             <div className="flex-1 overflow-y-auto px-6 py-4">
@@ -309,9 +518,47 @@ export function HermesChat() {
                     </div>
                   );
                 })}
+                {showHermesTypingIndicator && (
+                  <div className="flex flex-col gap-0.5 items-start">
+                    <div className="max-w-[70%] rounded-lg bg-muted px-3 py-2 text-sm text-foreground">
+                      <span className="inline-flex items-center gap-2">
+                        <span aria-hidden className="inline-flex items-center gap-1">
+                          <span className="size-1.5 rounded-full bg-primary animate-pulse [animation-delay:0ms]" />
+                          <span className="size-1.5 rounded-full bg-primary animate-pulse [animation-delay:150ms]" />
+                          <span className="size-1.5 rounded-full bg-primary animate-pulse [animation-delay:300ms]" />
+                        </span>
+                        <span>Hermes is working…</span>
+                      </span>
+                    </div>
+                  </div>
+                )}
               </div>
               <div ref={messagesEndRef} />
             </div>
+
+            {replyStatus && (
+              <div
+                className={`border-t px-4 py-2 text-xs ${
+                  replyStatus.tone === "error"
+                    ? "text-destructive"
+                    : replyStatus.tone === "warning"
+                      ? "text-warning"
+                      : replyStatus.tone === "active"
+                        ? "text-foreground"
+                        : "text-muted-foreground"
+                }`}
+              >
+                <span className="inline-flex items-center gap-2">
+                  {replyStatus.tone === "active" && (
+                    <span aria-hidden className="size-2 rounded-full bg-success animate-pulse" />
+                  )}
+                  {replyStatus.tone === "warning" && (
+                    <span aria-hidden className="size-2 rounded-full bg-warning animate-pulse" />
+                  )}
+                  {replyStatus.text}
+                </span>
+              </div>
+            )}
 
             <form onSubmit={handleSend} className="border-t px-4 py-3">
               <div className="flex gap-2">

@@ -68,3 +68,4 @@ server/server
 data/
 .kilo
 .idea
+docs/hive-plugin/session-store.json

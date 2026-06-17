@@ -67,8 +67,12 @@ persist and simply go unanswered until it reconnects.
 **Authenticate:** immediately after the socket opens, send one JSON frame:
 
 ```json
-{ "type": "auth", "token": "mul_…the PAT…" }
+{ "type": "auth", "payload": { "token": "mul_…the PAT…" } }
 ```
+
+The server responds with `{"type":"auth_ack"}` on success. The token is nested
+inside a `payload` object — a flat `{"token": "…"}` at the top level is rejected
+with `"expected auth message as first frame"`.
 
 On connect the server subscribes you to the `workspace` scope, so you receive every
 workspace-scoped broadcast (`server/internal/realtime/hub.go`).
@@ -118,10 +122,18 @@ on hive:message:created:
 Before answering, pull recent history for the thread:
 
 ```
-GET /api/plugins/hive/hermes-messages?thread_id=<id>&workspace_id=${HERMES_WORKSPACE_ID}&limit=30
-Authorization: Bearer ${HERMES_PAT}
-X-Workspace-ID: ${HERMES_WORKSPACE_ID}
+GET /api/plugins/hive/hermes-messages?thread_id=<id>&workspace_slug=plugin-hive&limit=30
+Authorization: Bearer ***
+X-Workspace-Slug: plugin-hive
 ```
+
+**Important:** The Hive plugin endpoints are behind `RequireWorkspaceMember` middleware
+which resolves the workspace via `resolveWorkspaceUUID`. This resolver checks
+`workspace_slug` (query param or `X-Workspace-Slug` header) **first**, then falls
+back to `workspace_id` / `X-Workspace-ID`. In practice, `workspace_slug` is the
+reliable param — `workspace_id` as a query param alone may return 400 on some
+middleware paths. Always send `workspace_slug` (or `X-Workspace-Slug`) alongside
+`workspace_id` for compatibility.
 
 Returns newest-first `HermesMessage[]` (same shape as §4). For older pages use the tuple
 cursor `&before=<CreatedAt>&before_id=<ID>` (both required together, or you get 400 —
@@ -134,13 +146,17 @@ post-`mpu-fix-2`).
 Same endpoint for responding and for proactively starting a message:
 
 ```
-POST /api/plugins/hive/hermes-messages
-Authorization: Bearer ${HERMES_PAT}
+POST /api/plugins/hive/hermes-messages?workspace_slug=plugin-hive
+Authorization: Bearer ***
 Content-Type: application/json
-X-Workspace-ID: ${HERMES_WORKSPACE_ID}
+X-Workspace-Slug: plugin-hive
 
 { "thread_id": "<uuid>", "workspace_id": "${HERMES_WORKSPACE_ID}", "body": "…reply…" }
 ```
+
+Include `?workspace_slug=plugin-hive` and `X-Workspace-Slug: plugin-hive` per the
+note in §6. The `workspace_id` in the body is validated against the
+middleware-resolved workspace.
 
 - `author_id` is **ignored** if sent — the server stamps it from the PAT's user.
 - Returns `201` + the created message. The server also broadcasts it (so the human's UI
@@ -149,7 +165,7 @@ X-Workspace-ID: ${HERMES_WORKSPACE_ID}
 To start a brand-new thread (proactive, not tied to an existing one):
 
 ```
-POST /api/plugins/hive/hermes-threads
+POST /api/plugins/hive/hermes-threads?workspace_slug=plugin-hive
 { "workspace_id": "${HERMES_WORKSPACE_ID}", "title": "…" }
 → 201 { ID, … }   then POST a message with that thread_id.
 ```

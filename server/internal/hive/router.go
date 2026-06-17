@@ -43,6 +43,7 @@ func Router(store *Store, hub realtime.Broadcaster) chi.Router {
 	r.Post("/hermes-threads", handleCreateThread(store))
 	r.Get("/hermes-messages", handleListMessages(store))
 	r.Post("/hermes-messages", handleCreateMessage(store, hub))
+	r.Get("/hermes-bridge-status", handleGetHermesBridgeStatus())
 
 	r.Get("/skill-catalog", handleGetSkillCatalog(store))
 	r.Post("/skill-catalog/materialize", handleMaterializeCatalogSkill(store))
@@ -518,6 +519,23 @@ func handleCreateMessage(store *Store, hub realtime.Broadcaster) http.HandlerFun
 			}
 		}
 		writeJSON(w, http.StatusCreated, msg)
+	}
+}
+
+func handleGetHermesBridgeStatus() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		wsID, ok := trustedWorkspaceID(r)
+		if !ok {
+			http.Error(w, `{"error":"workspace context missing"}`, http.StatusUnauthorized)
+			return
+		}
+
+		if !rejectWorkspaceMismatch(w, wsID, r.URL.Query().Get("workspace_id")) {
+			return
+		}
+
+		threadID := strings.TrimSpace(r.URL.Query().Get("thread_id"))
+		writeJSON(w, http.StatusOK, readHermesBridgeStatus(wsID, threadID))
 	}
 }
 

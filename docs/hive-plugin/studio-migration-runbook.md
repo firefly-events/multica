@@ -86,6 +86,25 @@ subscriber. Multica WS + API are at `localhost:8080`.
 - Stop the dev-box stack (this machine): `kill` backend/web, `podman stop multica-postgres-1`.
 - Future: point any external clients at the studio host.
 
+## Access from the local Mac without colliding with local Multica
+Keep the local instance on `http://localhost:3000`, and tunnel the Studio instance to
+alternate local ports instead:
+
+```sh
+ssh -N \
+  -L 3300:127.0.0.1:3000 \
+  -L 38080:127.0.0.1:8080 \
+  -L 39119:127.0.0.1:9119 \
+  hive@192.168.86.91
+```
+
+Then use:
+- Studio Multica web: `http://localhost:3300`
+- Studio backend API: `http://localhost:38080`
+- Studio Hermes dashboard: `http://localhost:39119`
+
+See `docs/hive-plugin/studio-ssh-tunnel.md` for a reusable `~/.ssh/config` entry.
+
 ---
 ### Open items
 - Go version pin: confirm brew Go ≥ 1.26 (else install a pinned toolchain).

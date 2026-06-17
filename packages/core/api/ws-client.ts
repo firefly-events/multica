@@ -3,6 +3,7 @@ import { type Logger, noopLogger } from "../logger";
 
 type EventHandler = (payload: unknown, actorId?: string, actorType?: string) => void;
 
+export type WSConnectionState = "disconnected" | "connecting" | "connected" | "reconnecting";
 // Cap how much of an unparseable frame we put into the log. A malformed or
 // rogue server can stream arbitrarily large garbage, and the warn handler may
 // be a console / IPC bridge whose buffers we don't want to blow.
@@ -40,6 +41,8 @@ export class WSClient {
   private badFrameLogged = false;
   private onReconnectCallbacks = new Set<() => void>();
   private anyHandlers = new Set<(msg: WSMessage) => void>();
+  private connectionState: WSConnectionState = "disconnected";
+  private stateHandlers = new Set<(state: WSConnectionState) => void>();
   private logger: Logger;
 
   constructor(
@@ -62,6 +65,7 @@ export class WSClient {
   }
 
   connect() {
+    this.setConnectionState(this.hasConnectedBefore ? "reconnecting" : "connecting");
     this.badFrameLogged = false;
     const url = new URL(this.baseUrl);
     // Token is never sent as a URL query parameter — it would be logged by
@@ -138,6 +142,7 @@ export class WSClient {
 
     this.ws.onclose = () => {
       this.logger.warn("disconnected, reconnecting in 3s");
+      this.setConnectionState("reconnecting");
       this.reconnectTimer = setTimeout(() => this.connect(), 3000);
     };
 
@@ -149,6 +154,7 @@ export class WSClient {
 
   private onAuthenticated() {
     this.logger.info("connected");
+    this.setConnectionState("connected");
     if (this.hasConnectedBefore) {
       for (const cb of this.onReconnectCallbacks) {
         try {
@@ -174,9 +180,22 @@ export class WSClient {
       this.ws = null;
     }
     this.hasConnectedBefore = false;
+    this.setConnectionState("disconnected");
     this.handlers.clear();
     this.anyHandlers.clear();
     this.onReconnectCallbacks.clear();
+    this.stateHandlers.clear();
+  }
+
+  private setConnectionState(state: WSConnectionState) {
+    this.connectionState = state;
+    for (const handler of this.stateHandlers) {
+      handler(state);
+    }
+  }
+
+  getConnectionState() {
+    return this.connectionState;
   }
 
   on(event: WSEventType, handler: EventHandler) {
@@ -200,6 +219,14 @@ export class WSClient {
     this.onReconnectCallbacks.add(callback);
     return () => {
       this.onReconnectCallbacks.delete(callback);
+    };
+  }
+
+  onConnectionStateChange(handler: (state: WSConnectionState) => void) {
+    this.stateHandlers.add(handler);
+    handler(this.connectionState);
+    return () => {
+      this.stateHandlers.delete(handler);
     };
   }
 
