@@ -499,6 +499,30 @@ export function HermesChat() {
 
               <div className="flex flex-col gap-3">
                 {messages.map((msg) => {
+                  const role = msg.Role || "assistant";
+
+                  if (role === "tool") {
+                    return (
+                      <div key={msg.ID} className="flex flex-col gap-0.5 items-start">
+                        <div className="rounded px-3 py-1 text-xs text-muted-foreground bg-muted/60 max-w-[80%] truncate">
+                          {msg.Body}
+                        </div>
+                      </div>
+                    );
+                  }
+
+                  if (role === "reasoning") {
+                    return (
+                      <div key={msg.ID} className="flex flex-col gap-0.5 items-start">
+                        <details className="text-xs text-muted-foreground">
+                          <summary className="cursor-pointer select-none">ð­ thinking…</summary>
+                          <p className="mt-1 whitespace-pre-wrap text-muted-foreground">{msg.Body}</p>
+                        </details>
+                      </div>
+                    );
+                  }
+
+                  // assistant + user + legacy — unchanged
                   const isOwn = msg.AuthorID === userId;
                   return (
                     <div
