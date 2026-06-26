@@ -329,48 +329,197 @@ def http_post(path: str, body: dict) -> dict:
 # Hermes brain — persistent session via API server
 # ---------------------------------------------------------------------------
 
-def hermes_respond(thread_id: str, incoming_body: str) -> str:
-    """
-    Send message to the persistent Hermes session for this thread and return the reply.
-    Uses the Hermes API server for full conversation memory and tool access.
-    """
-    session_id = get_or_create_session(thread_id)
+def _post_message(thread_id: str, body: str, role: str = "assistant") -> dict:
+    """Post a single message to Multica hermes-messages endpoint with role."""
+    return http_post(
+        "/api/plugins/hive/hermes-messages",
+        {
+            "thread_id": thread_id,
+            "workspace_id": CONFIG["HERMES_WORKSPACE_ID"],
+            "body": body,
+            "role": role,
+        },
+    )
 
+
+def hermes_respond_sse(thread_id: str, incoming_body: str, session_id: str) -> None:
+    """
+    Stream a Hermes turn via SSE (POST .../chat/stream), posting discrete messages
+    to Multica as events arrive.
+
+    Decision: path A — post-on-complete, NO PATCH, NO live token streaming.
+    - tool/thinking lines post live as compact single messages.
+    - assistant prose posts as ONE message when run.completed fires.
+    - TODO(s7): populate tokens_used/context_window from run.completed usage payload.
+    """
+    url = f"{CONFIG['HERMES_API_URL']}/api/sessions/{session_id}/chat/stream"
     try:
         resp = requests.post(
-            f"{CONFIG['HERMES_API_URL']}/api/sessions/{session_id}/chat",
+            url,
             headers=_api_headers(),
             json={"message": incoming_body},
-            timeout=120,
+            stream=True,
+            timeout=(10, 300),  # 10s connect, 300s read — bounded but generous
         )
-
-        if resp.status_code == 404:
-            # Session expired/invalid, recreate
-            log.warning("Session %s not found, recreating for thread %s", session_id[:8], thread_id[:8])
-            _session_cache.pop(thread_id, None)
-            _save_session_cache()
-            session_id = get_or_create_session(thread_id)
-            resp = requests.post(
-                f"{CONFIG['HERMES_API_URL']}/api/sessions/{session_id}/chat",
-                headers=_api_headers(),
-                json={"message": incoming_body},
-                timeout=120,
-            )
-
-        if resp.status_code == 200:
-            data = resp.json()
-            content = data.get("message", {}).get("content", "")
-            return content
-        else:
-            log.error("Hermes API error: %s %s", resp.status_code, resp.text[:300])
-            return f"[Bridge error: HTTP {resp.status_code}]"
-
-    except requests.Timeout:
-        log.error("Hermes API timed out for thread %s", thread_id[:8])
-        return "[Bridge: timeout — Hermes took too long to respond]"
+        resp.raise_for_status()
     except Exception as e:
-        log.error("Hermes API call failed: %s", e)
-        return f"[Bridge error: {e}]"
+        log.error("SSE stream open failed for session %s: %s", session_id[:8], e)
+        raise
+
+    # Per-run state
+    text_buffer = ""          # accumulate assistant.delta fragments
+    final_content = None      # set from assistant.completed (authoritative)
+    thinking_posted = False   # guard: post reasoning message only once per run
+
+    # FIX1+FIX3: spec-correct SSE framing — accumulate per-event, dispatch on blank line.
+    run_completed = False       # FIX1: track whether run.completed fired
+    cur_event_name: Optional[str] = None
+    cur_data_lines: list = []
+
+    def _dispatch_event(ev_name: Optional[str], data_lines: list) -> bool:
+        """
+        Dispatch one fully-accumulated SSE event.
+        Returns True if the loop should break (stream done).
+        Mutates text_buffer, final_content, thinking_posted via nonlocal.
+        """
+        nonlocal text_buffer, final_content, thinking_posted, run_completed
+
+        if not data_lines:
+            return False  # heartbeat/comment-only event — skip
+
+        data_str = "\n".join(data_lines)
+
+        if not data_str or data_str == "[DONE]":
+            return True  # sentinel — done
+
+        try:
+            payload = json.loads(data_str)
+        except json.JSONDecodeError:
+            log.debug("SSE non-JSON data (event=%s): %s", ev_name, data_str[:80])
+            return False
+
+        ev = ev_name
+
+        if ev == "run.started":
+            log.debug("SSE run.started")
+            # status already set to "running" by caller; no post
+
+        elif ev == "message.started":
+            log.debug("SSE message.started: %s", payload.get("message", {}).get("id", "")[:8])
+
+        elif ev == "tool.progress":
+            tool_name = payload.get("tool_name", "")
+            if tool_name == "_thinking":
+                if not thinking_posted:
+                    thinking_posted = True
+                    try:
+                        _post_message(thread_id, "💭 thinking…", role="reasoning")
+                        log.debug("SSE posted thinking message")
+                    except Exception as e:
+                        log.warning("Failed to post thinking message: %s", e)
+            # Non-_thinking tool.progress deltas: ignore (tool.started/completed carry the line)
+
+        elif ev == "tool.started":
+            tool_name = payload.get("tool_name", "")
+            preview = payload.get("preview", "") or ""
+            compact = f"🔧 {tool_name}"
+            if preview:
+                compact += f" — {preview[:60]}"
+            try:
+                _post_message(thread_id, compact, role="tool")
+                log.debug("SSE posted tool.started: %s", tool_name)
+            except Exception as e:
+                log.warning("Failed to post tool message: %s", e)
+
+        elif ev == "tool.completed":
+            pass  # No PATCH route; skip retro-update
+
+        elif ev == "tool.failed":
+            tool_name = payload.get("tool_name", "")
+            try:
+                _post_message(thread_id, f"✗ {tool_name} failed", role="tool")
+                log.debug("SSE posted tool.failed: %s", tool_name)
+            except Exception as e:
+                log.warning("Failed to post tool.failed message: %s", e)
+
+        elif ev == "assistant.delta":
+            delta = payload.get("delta", "")
+            if delta:
+                text_buffer += delta
+
+        elif ev == "assistant.completed":
+            # Prefer authoritative full content from this event
+            final_content = payload.get("content") or text_buffer
+
+        elif ev == "run.completed":
+            # Post the assistant message NOW (one message for the whole turn)
+            msg_content = final_content or text_buffer
+            # TODO(s7): extract usage = payload.get("usage", {}) and pass
+            #           tokens_used / context_window to _post_message once
+            #           the server endpoint accepts them.
+            if msg_content:
+                try:
+                    result = _post_message(thread_id, msg_content, role="assistant")
+                    log.info("SSE run done, assistant message posted: %s", result.get("ID", "?")[:8])
+                except Exception as e:
+                    log.error("Failed to post assistant message on run.completed: %s", e)
+                    raise
+            else:
+                log.warning("SSE run.completed with no content — nothing posted")
+            _set_thread_status(thread_id, "posting")
+            run_completed = True
+            return True  # break — done
+
+        elif ev == "done":
+            return True  # break
+
+        else:
+            log.debug("SSE unknown event: %s", ev)
+
+        return False
+
+    for raw_line in resp.iter_lines():
+        if raw_line is None:
+            break
+        if isinstance(raw_line, bytes):
+            raw_line = raw_line.decode("utf-8", errors="replace")
+
+        if raw_line.startswith("event:"):
+            cur_event_name = raw_line[len("event:"):].strip()
+
+        elif raw_line.startswith("data:"):
+            cur_data_lines.append(raw_line[len("data:"):].strip())
+
+        elif raw_line == "":
+            # Blank line — dispatch the accumulated event, then reset
+            if _dispatch_event(cur_event_name, cur_data_lines):
+                cur_event_name = None
+                cur_data_lines = []
+                break
+            cur_event_name = None
+            cur_data_lines = []
+
+        else:
+            log.debug("SSE unexpected line format: %s", raw_line[:80])
+
+    # Flush any partial event that arrived without a trailing blank line
+    if cur_data_lines and not run_completed:
+        _dispatch_event(cur_event_name, cur_data_lines)
+
+    # FIX1: post-loop guard — if stream ended without run.completed, rescue buffered text
+    if not run_completed:
+        rescue_content = final_content or text_buffer
+        if rescue_content:
+            log.warning("SSE stream ended without run.completed — posting buffered assistant text")
+            try:
+                _post_message(thread_id, rescue_content, role="assistant")
+                _set_thread_status(thread_id, "posting")
+            except Exception as e:
+                log.error("Failed to post rescued assistant content: %s", e)
+                raise
+        else:
+            log.warning("SSE stream ended without run.completed and no buffered content")
+
 
 # ---------------------------------------------------------------------------
 # Message handler
@@ -383,12 +532,13 @@ def handle_message(msg: dict):
     author_id = msg.get("AuthorID", "")
     body = msg.get("Body", "")
 
-    # Loop guard: skip own messages
+    # Loop guard: skip own messages (critical now that the bot posts multiple
+    # messages per turn — tool/reasoning lines + final assistant message)
     if author_id == CONFIG["HERMES_BOT_USER_ID"]:
         log.info("Skipping own message %s (loop guard)", msg_id[:8])
         return
 
-    # Idempotency
+    # Idempotency — ring buffer prevents duplicate processing
     if seen(msg_id):
         log.debug("Already handled %s", msg_id[:8])
         return
@@ -397,31 +547,36 @@ def handle_message(msg: dict):
     _update_bridge_status(mark_event=True, last_error="")
     _set_thread_status(thread_id, "running", message_id=msg_id)
 
-    # Get Hermes to respond via persistent session
-    reply_text = hermes_respond(thread_id, body)
+    session_id = get_or_create_session(thread_id)
 
-    if not reply_text:
-        log.warning("Empty reply, skipping post")
-        _set_thread_status(thread_id, "error", message_id=msg_id, error="empty reply")
-        return
-
-    # Post reply
+    # Handle 404 (session expired) by recreating once before giving up
     try:
-        _set_thread_status(thread_id, "posting", message_id=msg_id)
-        result = http_post(
-            "/api/plugins/hive/hermes-messages",
-            {
-                "thread_id": thread_id,
-                "workspace_id": CONFIG["HERMES_WORKSPACE_ID"],
-                "body": reply_text,
-            },
-        )
-        log.info("Reply posted: %s", result.get("ID", "?")[:8])
-        _set_thread_status(thread_id, "idle", message_id=result.get("ID", "") or msg_id)
+        hermes_respond_sse(thread_id, body, session_id)
+    except requests.HTTPError as e:
+        if e.response is not None and e.response.status_code == 404:
+            log.warning("Session %s not found, recreating for thread %s", session_id[:8], thread_id[:8])
+            _session_cache.pop(thread_id, None)
+            _save_session_cache()
+            session_id = get_or_create_session(thread_id)
+            try:
+                hermes_respond_sse(thread_id, body, session_id)
+            except Exception as e2:
+                log.error("SSE retry after session recreate failed: %s", e2)
+                _set_thread_status(thread_id, "error", message_id=msg_id, error=str(e2))
+                _update_bridge_status(last_error=str(e2))
+                return
+        else:
+            log.error("SSE stream HTTP error: %s", e)
+            _set_thread_status(thread_id, "error", message_id=msg_id, error=str(e))
+            _update_bridge_status(last_error=str(e))
+            return
     except Exception as e:
-        log.error("Failed to post reply: %s", e)
+        log.error("SSE stream failed: %s", e)
         _set_thread_status(thread_id, "error", message_id=msg_id, error=str(e))
         _update_bridge_status(last_error=str(e))
+        return
+
+    _set_thread_status(thread_id, "idle", message_id=msg_id)
 
 # ---------------------------------------------------------------------------
 # WebSocket loop

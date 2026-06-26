@@ -134,7 +134,7 @@ func TestHermesThreadMessageRoundTrip(t *testing.T) {
 	}
 
 	// Create messages
-	msg1, err := store.CreateMessage(ctx, workspaceID, thread.ID, "user-1", "Hello")
+	msg1, err := store.CreateMessage(ctx, workspaceID, thread.ID, "user-1", "Hello", "user", nil, nil)
 	if err != nil {
 		t.Fatalf("CreateMessage(1): %v", err)
 	}
@@ -145,7 +145,7 @@ func TestHermesThreadMessageRoundTrip(t *testing.T) {
 		t.Errorf("Body: got %q want %q", msg1.Body, "Hello")
 	}
 
-	msg2, err := store.CreateMessage(ctx, workspaceID, thread.ID, "user-2", "World")
+	msg2, err := store.CreateMessage(ctx, workspaceID, thread.ID, "user-2", "World", "assistant", nil, nil)
 	if err != nil {
 		t.Fatalf("CreateMessage(2): %v", err)
 	}

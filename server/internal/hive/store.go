@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -342,17 +343,23 @@ var ErrThreadNotInWorkspace = errors.New("hive: thread not found in workspace")
 
 // CreateMessage inserts a new message into a thread. It atomically verifies that
 // the thread belongs to workspaceID before inserting, preventing cross-workspace writes.
-func (s *Store) CreateMessage(ctx context.Context, workspaceID, threadID, authorID, body string) (HermesMessage, error) {
+// role defaults to "assistant" if empty. tokensUsed and contextWindow are optional
+// (nil leaves the DB column at its default/NULL).
+func (s *Store) CreateMessage(ctx context.Context, workspaceID, threadID, authorID, body, role string, tokensUsed, contextWindow *int) (HermesMessage, error) {
+	role = strings.TrimSpace(role)
+	if role == "" {
+		role = "assistant"
+	}
 	var m HermesMessage
 	// The INSERT selects workspace_id directly from hermes_threads scoped by both
 	// thread id and workspace, so a thread in another workspace returns zero rows.
 	err := s.pool.QueryRow(ctx, `
-		INSERT INTO hive.hermes_messages (thread_id, workspace_id, author_id, body)
-		SELECT $1::uuid, t.workspace_id, $3, $4
+		INSERT INTO hive.hermes_messages (thread_id, workspace_id, author_id, body, role, tokens_used, context_window)
+		SELECT $1::uuid, t.workspace_id, $3, $4, $5, $6, $7
 		FROM hive.hermes_threads t
 		WHERE t.id = $1::uuid AND t.workspace_id = $2::uuid
 		RETURNING id::text, thread_id::text, workspace_id::text, author_id, body, created_at::text, role, tokens_used, context_window
-	`, threadID, workspaceID, authorID, body).Scan(
+	`, threadID, workspaceID, authorID, body, role, tokensUsed, contextWindow).Scan(
 		&m.ID, &m.ThreadID, &m.WorkspaceID, &m.AuthorID, &m.Body, &m.CreatedAt, &m.Role, &m.TokensUsed, &m.ContextWindow,
 	)
 	if err != nil {
