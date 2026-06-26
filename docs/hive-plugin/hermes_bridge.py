@@ -284,8 +284,72 @@ def _load_system_prompt() -> str:
         "You have full tool access — use web_search for current info."
     )
 
+
+# FIX 2a: TTL cache for _session_title_for — collapses up-to-3x per-message GETs
+# to ~1 GET per 30s per thread. Lock guards the dict briefly; GET runs OUTSIDE lock.
+_title_cache: dict[str, tuple[str, float]] = {}  # thread_id → (title, monotonic_ts)
+_title_lock = threading.Lock()
+_TITLE_TTL_S = 30.0
+
+
+def _session_title_for(thread_id: str) -> str:
+    """Return deterministic [multica]-prefixed Hermes session title for a thread.
+
+    Fetches the Multica thread title via GET /api/plugins/hive/hermes-threads.
+    Falls back to f"[multica] thread {thread_id[:8]}" on any failure or empty title.
+    Never raises — callers depend on this being safe.
+
+    FIX 2a: TTL-cached (30 s) — check under _title_lock, GET outside lock, store under lock.
+    Collapses the up-to-3× per-message fetches to ~1 GET per 30 s per thread.
+    Never holds the lock across network I/O.
+    """
+    now = time.monotonic()
+    with _title_lock:
+        entry = _title_cache.get(thread_id)
+        if entry is not None and (now - entry[1]) < _TITLE_TTL_S:
+            return entry[0]
+    # Stale or absent — fetch outside the lock
+    fallback = f"[multica] thread {thread_id[:8]}"
+    result = fallback
+    try:
+        threads = http_get(
+            "/api/plugins/hive/hermes-threads",
+            params={"workspace_id": CONFIG["HERMES_WORKSPACE_ID"]},
+        )
+        if isinstance(threads, list):
+            for t in threads:
+                if t.get("ID") == thread_id:
+                    title = (t.get("Title") or "").strip()
+                    result = f"[multica] {title}" if title else fallback
+                    break
+        elif isinstance(threads, dict):
+            for t in threads.get("threads", threads.get("data", [])):
+                if t.get("ID") == thread_id:
+                    title = (t.get("Title") or "").strip()
+                    result = f"[multica] {title}" if title else fallback
+                    break
+    except Exception as exc:
+        log.warning("_session_title_for(%s): %s — using fallback", thread_id[:8], exc)
+    # Re-lock to store result (even fallback — avoids thundering herd on failures)
+    with _title_lock:
+        _title_cache[thread_id] = (result, time.monotonic())
+    return result
+
+
 def _find_existing_session(thread_id: str) -> Optional[str]:
-    """Check if a session already exists for this thread by listing sessions."""
+    """LEGACY best-effort fallback: scan Hermes session list by title.
+
+    The authoritative thread_id→session_id identity is the durable _session_cache /
+    session-store.json (keyed by thread_id, loaded at startup and consulted first in
+    get_or_create_session). This scan is called ONLY when the durable map has no entry
+    — i.e., on first run after a fresh install, or after a manual cache wipe.
+
+    On a scan miss a new session is created; any orphaned pre-cache session is harmless —
+    title is NOT a stable identity and cannot be relied on across renames.
+
+    FIX 1: matches against EITHER the current title format f"[multica] {Title}" OR the
+    legacy format f"hive:{thread_id}" so pre-s3 sessions still resolve without re-creating.
+    """
     try:
         resp = _hermes_session.get(
             f"{CONFIG['HERMES_API_URL']}/api/sessions",
@@ -295,12 +359,14 @@ def _find_existing_session(thread_id: str) -> Optional[str]:
         )
         if resp.status_code == 200:
             sessions = resp.json().get("sessions", resp.json().get("data", {}).get("sessions", []))
-            title = f"hive:{thread_id}"
+            current_title = _session_title_for(thread_id)
+            legacy_title = f"hive:{thread_id}"
             for s in sessions:
-                if s.get("title") == title:
+                t = s.get("title", "")
+                if t == current_title or t == legacy_title:
                     return s["id"]
     except Exception as exc:
-        log.warning("Failed to list sessions: %s", exc)
+        log.warning("Failed to list sessions (legacy scan): %s", exc)
     return None
 
 def get_or_create_session(thread_id: str) -> str:
@@ -331,7 +397,7 @@ def get_or_create_session(thread_id: str) -> str:
             f"{CONFIG['HERMES_API_URL']}/api/sessions",
             headers=_api_headers(),
             json={
-                "title": f"hive:{thread_id}",
+                "title": _session_title_for(thread_id),
                 "system_prompt": system_prompt,
             },
             timeout=15,
@@ -705,6 +771,34 @@ def handle_message(msg: dict):
         _set_thread_status(thread_id, "error", message_id=msg_id, error=str(e))
         _update_bridge_status(last_error=str(e))
         return
+
+    # FIX 2b: best-effort rename-sync AFTER the SSE turn (off critical path).
+    # Runs once per message in the worker; does NOT delay time-to-first-visible.
+    # FIX 3: recheck cached_title under _session_lock immediately before PATCH —
+    # another worker may have already synced while this turn was running.
+    try:
+        want = _session_title_for(thread_id)
+        with _session_lock:
+            cached_title = _session_cache.get(thread_id, {}).get("title")
+        if want != cached_title:
+            # FIX 3: recheck under lock before issuing the PATCH — skip if already synced
+            with _session_lock:
+                rechecked = _session_cache.get(thread_id, {}).get("title")
+            if want != rechecked:
+                # PATCH runs OUTSIDE lock — no lock held across network I/O
+                _hermes_session.patch(
+                    f"{CONFIG['HERMES_API_URL']}/api/sessions/{session_id}",
+                    headers=_api_headers(),
+                    json={"title": want},
+                    timeout=10,
+                )
+                # FIX 3: update cache under lock after successful PATCH
+                with _session_lock:
+                    if thread_id in _session_cache:
+                        _session_cache[thread_id]["title"] = want
+                log.info("Synced session title for thread %s: %r", thread_id[:8], want)
+    except Exception as exc:
+        log.warning("Title sync for thread %s failed (best-effort): %s", thread_id[:8], exc)
 
     _set_thread_status(thread_id, "idle", message_id=msg_id)
 
