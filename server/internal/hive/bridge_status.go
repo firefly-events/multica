@@ -12,7 +12,15 @@ import (
 
 const bridgeStatusStaleAfter = 12 * time.Second
 
-func bridgeStatusFilePath() string {
+// bridgeStatusFilePath returns the path to the bridge status JSON file.
+// s9: when workspaceID is non-empty, returns a per-workspace path; the env-var
+// override is ignored so each workspace gets its own isolated file.
+// When workspaceID is empty (back-compat legacy call), the env-var override
+// applies and the generic file name is used.
+func bridgeStatusFilePath(workspaceID string) string {
+	if workspaceID != "" {
+		return filepath.Join(os.TempDir(), "multica-hermes-bridge-status-"+workspaceID+".json")
+	}
 	if path := strings.TrimSpace(os.Getenv("MULTICA_HERMES_BRIDGE_STATUS_PATH")); path != "" {
 		return path
 	}
@@ -87,12 +95,19 @@ func readHermesBridgeStatus(workspaceID, threadID string) HermesBridgeStatusResp
 		Thread: HermesBridgeThreadStatus{State: "unknown"},
 	}
 
-	snap, err := loadBridgeStatusSnapshot(bridgeStatusFilePath())
+	// s9: try per-workspace path first; fall back to legacy path if not found
+	snap, err := loadBridgeStatusSnapshot(bridgeStatusFilePath(workspaceID))
 	if err != nil {
-		if !errors.Is(err, os.ErrNotExist) {
-			resp.Bridge.LastError = err.Error()
+		if errors.Is(err, os.ErrNotExist) && workspaceID != "" {
+			// Fallback to legacy (empty workspaceID) path for back-compat
+			snap, err = loadBridgeStatusSnapshot(bridgeStatusFilePath(""))
 		}
-		return resp
+		if err != nil {
+			if !errors.Is(err, os.ErrNotExist) {
+				resp.Bridge.LastError = err.Error()
+			}
+			return resp
+		}
 	}
 	if snap.WorkspaceID != "" && workspaceID != "" && snap.WorkspaceID != workspaceID {
 		resp.Bridge.LastError = "bridge status belongs to another workspace"
