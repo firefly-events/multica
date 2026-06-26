@@ -31,6 +31,7 @@ import sys
 import tempfile
 import time
 import logging
+import queue
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
@@ -38,6 +39,11 @@ from typing import Optional, Union
 
 import websocket
 import requests
+
+# ---------------------------------------------------------------------------
+# Keep-alive HTTP sessions (s4: avoid per-request TCP handshake overhead)
+_hermes_session = requests.Session()  # for HERMES_API_URL calls
+_multica_session = requests.Session()  # for HERMES_SERVER_HTTP calls
 
 # ---------------------------------------------------------------------------
 # Config
@@ -184,17 +190,22 @@ def _heartbeat_loop() -> None:
 # ---------------------------------------------------------------------------
 
 _seen_message_ids: set[str] = set()
+_seen_lock = threading.Lock()     # s4: atomic check-add-evict in seen()
+_session_lock = threading.Lock()  # s4: guard _session_cache + _prev_input_tokens
+_msg_queue: "queue.Queue[dict | None]" = queue.Queue()  # s4: worker dispatch queue
+_workers: list = []  # s4: bridge-worker thread refs for shutdown
 
 def seen(msg_id: str) -> bool:
-    """Return True if we've already handled this message ID."""
-    if msg_id in _seen_message_ids:
-        return True
-    _seen_message_ids.add(msg_id)
-    # Keep ring bounded
-    if len(_seen_message_ids) > 1000:
-        for _id in list(_seen_message_ids)[:200]:
-            _seen_message_ids.discard(_id)
-    return False
+    """Return True if we've already handled this message ID (s4: lock for worker concurrency)."""
+    with _seen_lock:
+        if msg_id in _seen_message_ids:
+            return True
+        _seen_message_ids.add(msg_id)
+        # Keep ring bounded
+        if len(_seen_message_ids) > 1000:
+            for _id in list(_seen_message_ids)[:200]:
+                _seen_message_ids.discard(_id)
+        return False
 
 # ---------------------------------------------------------------------------
 # Session management — thread_id → Hermes session_id
@@ -276,7 +287,7 @@ def _load_system_prompt() -> str:
 def _find_existing_session(thread_id: str) -> Optional[str]:
     """Check if a session already exists for this thread by listing sessions."""
     try:
-        resp = requests.get(
+        resp = _hermes_session.get(
             f"{CONFIG['HERMES_API_URL']}/api/sessions",
             headers=_api_headers(),
             params={"limit": 200},
@@ -293,23 +304,30 @@ def _find_existing_session(thread_id: str) -> Optional[str]:
     return None
 
 def get_or_create_session(thread_id: str) -> str:
-    """Get existing Hermes session ID for a thread, or create a new one."""
-    # Check in-memory cache first
-    if thread_id in _session_cache:
-        return _session_cache[thread_id]["id"]
+    """Get existing Hermes session ID for a thread, or create a new one.
 
-    # Check disk / API for existing session
+    s4 locking: cache hit checked under _session_lock (brief, no I/O).
+    Network calls happen OUTSIDE the lock to avoid serializing turns behind HTTP.
+    Dict mutation + file write are re-locked briefly before returning.
+    """
+    # Fast path: cache hit (brief lock, no I/O)
+    with _session_lock:
+        if thread_id in _session_cache:
+            return _session_cache[thread_id]["id"]
+
+    # Check disk / API for existing session (outside lock — network I/O)
     existing = _find_existing_session(thread_id)
     if existing:
-        _session_cache[thread_id] = {"id": existing, "model": None}
-        _save_session_cache()
+        with _session_lock:
+            _session_cache[thread_id] = {"id": existing, "model": None}
+            _save_session_cache()
         log.info("Found existing session %s for thread %s", existing[:8], thread_id[:8])
         return existing
 
-    # Create new session
+    # Create new session (outside lock — network I/O; rare: once per thread)
     system_prompt = _load_system_prompt()
     try:
-        resp = requests.post(
+        resp = _hermes_session.post(
             f"{CONFIG['HERMES_API_URL']}/api/sessions",
             headers=_api_headers(),
             json={
@@ -322,8 +340,9 @@ def get_or_create_session(thread_id: str) -> str:
             session_data = resp.json()["session"]
             session_id = session_data["id"]
             session_model = session_data.get("model")  # s7: capture model at create time
-            _session_cache[thread_id] = {"id": session_id, "model": session_model}
-            _save_session_cache()
+            with _session_lock:
+                _session_cache[thread_id] = {"id": session_id, "model": session_model}
+                _save_session_cache()
             log.info("Created session %s (model=%s) for thread %s", session_id[:8], session_model, thread_id[:8])
             return session_id
         else:
@@ -334,11 +353,12 @@ def get_or_create_session(thread_id: str) -> str:
     raise RuntimeError(f"Cannot get or create session for thread {thread_id}")
 
 def _session_model(thread_id: str):
-    '''Return the cached model string for thread_id, or None if unknown.'''
-    entry = _session_cache.get(thread_id)
-    if isinstance(entry, dict):
-        return entry.get("model")
-    return None
+    '''Return the cached model string for thread_id, or None if unknown (s4: brief lock).'''
+    with _session_lock:
+        entry = _session_cache.get(thread_id)
+        if isinstance(entry, dict):
+            return entry.get("model")
+        return None
 
 # ---------------------------------------------------------------------------
 # HTTP helpers (Multica)
@@ -352,7 +372,7 @@ def _multica_auth_headers() -> dict:
 
 def http_get(path: str, params: Optional[dict] = None) -> Union[dict, list]:
     url = CONFIG["HERMES_SERVER_HTTP"] + path
-    resp = requests.get(url, headers=_multica_auth_headers(), params=params, timeout=15)
+    resp = _multica_session.get(url, headers=_multica_auth_headers(), params=params, timeout=15)
     resp.raise_for_status()
     return resp.json()
 
@@ -360,7 +380,7 @@ def http_post(path: str, body: dict) -> dict:
     url = CONFIG["HERMES_SERVER_HTTP"] + path
     headers = _multica_auth_headers()
     headers["Content-Type"] = "application/json"
-    resp = requests.post(url, headers=headers, json=body, timeout=15)
+    resp = _multica_session.post(url, headers=headers, json=body, timeout=15)
     resp.raise_for_status()
     return resp.json()
 
@@ -397,7 +417,7 @@ def _post_message(
     return http_post("/api/plugins/hive/hermes-messages", payload)
 
 
-def hermes_respond_sse(thread_id: str, incoming_body: str, session_id: str, model=None) -> None:
+def hermes_respond_sse(thread_id: str, incoming_body: str, session_id: str, model=None, t_recv: float = 0.0) -> None:
     """
     Stream a Hermes turn via SSE (POST .../chat/stream), posting discrete messages
     to Multica as events arrive.
@@ -409,8 +429,10 @@ def hermes_respond_sse(thread_id: str, incoming_body: str, session_id: str, mode
           run.completed usage payload and the session-model cache.
     """
     url = f"{CONFIG['HERMES_API_URL']}/api/sessions/{session_id}/chat/stream"
+    log.info("TIMING sse_open session=%s thread=%s elapsed=%.3fs",
+             session_id[:8], thread_id[:8], time.perf_counter() - t_recv)
     try:
-        resp = requests.post(
+        resp = _hermes_session.post(
             url,
             headers=_api_headers(),
             json={"message": incoming_body},
@@ -423,6 +445,7 @@ def hermes_respond_sse(thread_id: str, incoming_body: str, session_id: str, mode
         raise
 
     # Per-run state
+    _first_visible = False  # s4: guard for TIMING first_visible log
     text_buffer = ""          # accumulate assistant.delta fragments
     final_content = None      # set from assistant.completed (authoritative)
     thinking_posted = False   # guard: post reasoning message only once per run
@@ -438,7 +461,18 @@ def hermes_respond_sse(thread_id: str, incoming_body: str, session_id: str, mode
         Returns True if the loop should break (stream done).
         Mutates text_buffer, final_content, thinking_posted via nonlocal.
         """
-        nonlocal text_buffer, final_content, thinking_posted, run_completed
+        nonlocal text_buffer, final_content, thinking_posted, run_completed, _first_visible
+
+        def _mark_first_visible() -> None:
+            """Emit TIMING first_visible exactly once per turn."""
+            nonlocal _first_visible
+            if not _first_visible:
+                _first_visible = True
+                log.info(
+                    "TIMING first_visible session=%s elapsed=%.3fs",
+                    session_id[:8], time.perf_counter() - t_recv,
+                )
+
 
         if not data_lines:
             return False  # heartbeat/comment-only event — skip
@@ -470,6 +504,7 @@ def hermes_respond_sse(thread_id: str, incoming_body: str, session_id: str, mode
                     thinking_posted = True
                     try:
                         _post_message(thread_id, "💭 thinking…", role="reasoning")
+                        _mark_first_visible()  # s4: thinking was first visible
                         log.debug("SSE posted thinking message")
                     except Exception as e:
                         log.warning("Failed to post thinking message: %s", e)
@@ -483,6 +518,7 @@ def hermes_respond_sse(thread_id: str, incoming_body: str, session_id: str, mode
                 compact += f" — {preview[:60]}"
             try:
                 _post_message(thread_id, compact, role="tool")
+                _mark_first_visible()  # s4: tool was first visible
                 log.debug("SSE posted tool.started: %s", tool_name)
             except Exception as e:
                 log.warning("Failed to post tool message: %s", e)
@@ -520,19 +556,21 @@ def hermes_respond_sse(thread_id: str, incoming_body: str, session_id: str, mode
                 except (TypeError, ValueError):
                     cur_input = None
                 if cur_input is not None:
-                    prev = _prev_input_tokens.get(session_id, 0)
-                    if cur_input < prev:
-                        # session reset / context compaction boundary
-                        turn_tokens = cur_input
-                    else:
-                        turn_tokens = cur_input - prev
-                    # ALWAYS update watermark when a numeric value is present (incl 0)
-                    if session_id not in _prev_input_tokens and len(_prev_input_tokens) >= 1000:
-                        # soft cap: clear ~half to bound memory; dropped sessions recount from 0
-                        keys = list(_prev_input_tokens.keys())
-                        for k in keys[:500]:
-                            del _prev_input_tokens[k]
-                    _prev_input_tokens[session_id] = cur_input
+                    # s4: lock briefly for watermark get+set (NOT held across SSE or HTTP)
+                    with _session_lock:
+                        prev = _prev_input_tokens.get(session_id, 0)
+                        if cur_input < prev:
+                            # session reset / context compaction boundary
+                            turn_tokens = cur_input
+                        else:
+                            turn_tokens = cur_input - prev
+                        # ALWAYS update watermark when a numeric value is present (incl 0)
+                        if session_id not in _prev_input_tokens and len(_prev_input_tokens) >= 1000:
+                            # soft cap: clear ~half to bound memory; dropped sessions recount from 0
+                            keys = list(_prev_input_tokens.keys())
+                            for k in keys[:500]:
+                                del _prev_input_tokens[k]
+                        _prev_input_tokens[session_id] = cur_input
             # s7: context window from model→window map; model from caller (session-create cache)
             ctx_window = MODEL_CONTEXT_WINDOWS.get(model) if model else None
             if msg_content:
@@ -545,6 +583,9 @@ def hermes_respond_sse(thread_id: str, incoming_body: str, session_id: str, mode
                     )
                     log.info("SSE run done, assistant message posted: %s (tokens=%s model=%s)",
                              result.get("ID", "?")[:8], turn_tokens, model)
+                    _mark_first_visible()  # s4: prose-only turn, this is first visible
+                    log.info("TIMING assistant_posted session=%s elapsed=%.3fs",
+                             session_id[:8], time.perf_counter() - t_recv)
                 except Exception as e:
                     log.error("Failed to post assistant message on run.completed: %s", e)
                     raise
@@ -614,6 +655,7 @@ def hermes_respond_sse(thread_id: str, incoming_body: str, session_id: str, mode
 
 def handle_message(msg: dict):
     """Process a single hive:message:created event."""
+    t_recv = time.perf_counter()  # s4: timing — message received from WS queue
     msg_id = msg.get("ID", "")
     thread_id = msg.get("ThreadID", "")
     author_id = msg.get("AuthorID", "")
@@ -638,15 +680,16 @@ def handle_message(msg: dict):
 
     # Handle 404 (session expired) by recreating once before giving up
     try:
-        hermes_respond_sse(thread_id, body, session_id, model=_session_model(thread_id))
+        hermes_respond_sse(thread_id, body, session_id, model=_session_model(thread_id), t_recv=t_recv)
     except requests.HTTPError as e:
         if e.response is not None and e.response.status_code == 404:
             log.warning("Session %s not found, recreating for thread %s", session_id[:8], thread_id[:8])
-            _session_cache.pop(thread_id, None)
-            _save_session_cache()
+            with _session_lock:
+                _session_cache.pop(thread_id, None)
+                _save_session_cache()
             session_id = get_or_create_session(thread_id)
             try:
-                hermes_respond_sse(thread_id, body, session_id, model=_session_model(thread_id))
+                hermes_respond_sse(thread_id, body, session_id, model=_session_model(thread_id), t_recv=t_recv)
             except Exception as e2:
                 log.error("SSE retry after session recreate failed: %s", e2)
                 _set_thread_status(thread_id, "error", message_id=msg_id, error=str(e2))
@@ -664,6 +707,24 @@ def handle_message(msg: dict):
         return
 
     _set_thread_status(thread_id, "idle", message_id=msg_id)
+
+# ---------------------------------------------------------------------------
+# Worker queue (s4: process messages off the WS-recv thread)
+# ---------------------------------------------------------------------------
+
+def _worker() -> None:
+    """Drain _msg_queue; block on None poison-pill to exit."""
+    while True:
+        msg = _msg_queue.get()
+        if msg is None:
+            _msg_queue.task_done()
+            break
+        try:
+            handle_message(msg)
+        except Exception as e:
+            log.error("Worker error: %s", e)
+        finally:
+            _msg_queue.task_done()
 
 # ---------------------------------------------------------------------------
 # WebSocket loop
@@ -720,7 +781,7 @@ def run_ws():
                 if not message:
                     continue
 
-                handle_message(message)
+                _msg_queue.put(message)  # s4: hand off to worker thread
 
         except websocket.WebSocketTimeoutException:
             log.warning("WS timeout, reconnecting...")
@@ -773,12 +834,24 @@ def main():
     heartbeat = threading.Thread(target=_heartbeat_loop, name="bridge-heartbeat", daemon=True)
     heartbeat.start()
 
+    # s4: spawn 2 worker threads to process messages concurrently
+    global _workers
+    for i in range(2):
+        w = threading.Thread(target=_worker, name=f"bridge-worker-{i}", daemon=True)
+        w.start()
+        _workers.append(w)
+    log.info("Started %d bridge worker threads", len(_workers))
+
     # Handle graceful shutdown
     def _shutdown(signum, frame):
         log.info("Shutting down...")
         _status_stop.set()
+        # s4: poison-pill workers so they exit cleanly
+        for _ in _workers:
+            _msg_queue.put(None)
         _update_bridge_status(connected=False)
-        _save_session_cache()
+        with _session_lock:
+            _save_session_cache()
         sys.exit(0)
     signal.signal(signal.SIGINT, _shutdown)
     signal.signal(signal.SIGTERM, _shutdown)
