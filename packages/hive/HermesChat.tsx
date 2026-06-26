@@ -18,6 +18,12 @@ import {
 import { hiveRequest } from "./hiveRequest";
 import { HiveHeader } from "./HiveHeader";
 
+function fmtTokens(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`;
+  return String(n);
+}
+
 interface HermesThread {
   ID: string;
   WorkspaceID: string;
@@ -38,6 +44,7 @@ interface HermesMessage {
   Role: string;
   TokensUsed?: number | null;
   ContextWindow?: number | null;
+  Model?: string | null;
 }
 
 interface MessageCreatedPayload {
@@ -269,6 +276,15 @@ export function HermesChat() {
 
   const activeThread = threads.find((t) => t.ID === activeThreadId);
   const latestMessage = messages[messages.length - 1];
+  const latestAssistant = useMemo(
+    () => [...messages].reverse().find(
+      (m) => m.Role === "assistant" && (m.TokensUsed != null || m.Model != null)
+    ) ?? null,
+    [messages]
+  );
+  const asModel = latestAssistant?.Model ?? null;
+  const asTokens = latestAssistant?.TokensUsed ?? null;
+  const asWindow = latestAssistant?.ContextWindow ?? null;
   const latestMessageFromUser = latestMessage?.AuthorID === userId;
   const bridgeHealthy = !!bridgeStatus?.bridge.connected && !bridgeStatus?.bridge.stale;
   const wsConnected = wsStatus === "connected";
@@ -470,9 +486,21 @@ export function HermesChat() {
                 <h1 className="text-sm font-semibold">
                   {activeThread?.Title ?? "Thread"}
                 </h1>
-                <div className={`inline-flex items-center gap-2 rounded-full border px-2.5 py-1 text-[11px] ${bridgeHealth.textClass}`}>
-                  <span aria-hidden className={`size-2 rounded-full ${bridgeHealth.dotClass}`} />
-                  <span>{bridgeHealth.label}</span>
+                <div className="flex items-center gap-2 min-w-0">
+                  {asModel && (
+                    <div title={asModel} className="inline-flex items-center gap-2 rounded-full border px-2.5 py-1 text-[11px] text-muted-foreground max-w-[12rem] truncate">
+                      <span className="truncate">{asModel}</span>
+                    </div>
+                  )}
+                  {asTokens != null && (
+                    <div className="inline-flex items-center gap-2 rounded-full border px-2.5 py-1 text-[11px] text-muted-foreground">
+                      {fmtTokens(asTokens)}{asWindow ? ` / ${fmtTokens(asWindow)} · ${Math.round((asTokens / asWindow) * 100)}%` : ""}
+                    </div>
+                  )}
+                  <div className={`inline-flex items-center gap-2 rounded-full border px-2.5 py-1 text-[11px] ${bridgeHealth.textClass}`}>
+                    <span aria-hidden className={`size-2 rounded-full ${bridgeHealth.dotClass}`} />
+                    <span>{bridgeHealth.label}</span>
+                  </div>
                 </div>
               </div>
             </header>
