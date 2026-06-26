@@ -200,15 +200,45 @@ def seen(msg_id: str) -> bool:
 # Session management — thread_id → Hermes session_id
 # ---------------------------------------------------------------------------
 
-_session_cache: dict[str, str] = {}
+# s7: cache stores {id, model} dicts; back-compat: bare str entries tolerated on load
+_session_cache: dict[str, dict] = {}
+# s7: per-session cumulative input-token watermark for turn-delta computation
+_prev_input_tokens: dict[str, int] = {}
+
+# s7: known context windows keyed by Hermes session model string. Values are APPROXIMATE;
+# unknown models degrade to no-meter (None — ctx_window will be None for unlisted models).
+# 'hermes-agent' is the profile name this server returns for bridge-created sessions
+# (discovered via POST /api/sessions probe 2026-06-26). Window is 200k (Claude Sonnet default).
+# openrouter/* profiles listed for completeness; add entries as new profiles appear.
+MODEL_CONTEXT_WINDOWS: dict[str, int] = {
+    "hermes-agent": 200_000,          # Claude Sonnet via Hermes agent profile (VERIFIED)
+    "openrouter/owl-alpha": 200_000,   # observed in cron sessions
+    "claude-3-5-sonnet-20241022": 200_000,
+    "claude-opus-4-5": 200_000,
+    "claude-sonnet-4-5": 200_000,
+    "claude-haiku-3-5": 200_000,
+    "gpt-5": 128_000,                 # approximate
+    "gpt-4o": 128_000,
+}
 _session_store_path = Path(__file__).parent / "session-store.json"
 
 def _load_session_cache():
-    """Load thread_id → session_id mapping from disk."""
+    """Load thread_id → {id, model} mapping from disk.
+
+    Back-compat: if a stored value is a bare string (old format), migrates it
+    to {"id": value, "model": None} transparently so reads still work.
+    """
     global _session_cache
     if _session_store_path.exists():
         try:
-            _session_cache = json.loads(_session_store_path.read_text())
+            raw = json.loads(_session_store_path.read_text())
+            migrated = {}
+            for k, v in raw.items():
+                if isinstance(v, str):
+                    migrated[k] = {"id": v, "model": None}
+                else:
+                    migrated[k] = v
+            _session_cache = migrated
             log.info("Loaded %d session mappings from %s", len(_session_cache), _session_store_path)
         except Exception as exc:
             log.warning("Failed to load session cache: %s", exc)
@@ -266,12 +296,12 @@ def get_or_create_session(thread_id: str) -> str:
     """Get existing Hermes session ID for a thread, or create a new one."""
     # Check in-memory cache first
     if thread_id in _session_cache:
-        return _session_cache[thread_id]
+        return _session_cache[thread_id]["id"]
 
     # Check disk / API for existing session
     existing = _find_existing_session(thread_id)
     if existing:
-        _session_cache[thread_id] = existing
+        _session_cache[thread_id] = {"id": existing, "model": None}
         _save_session_cache()
         log.info("Found existing session %s for thread %s", existing[:8], thread_id[:8])
         return existing
@@ -289,10 +319,12 @@ def get_or_create_session(thread_id: str) -> str:
             timeout=15,
         )
         if resp.status_code == 201:
-            session_id = resp.json()["session"]["id"]
-            _session_cache[thread_id] = session_id
+            session_data = resp.json()["session"]
+            session_id = session_data["id"]
+            session_model = session_data.get("model")  # s7: capture model at create time
+            _session_cache[thread_id] = {"id": session_id, "model": session_model}
             _save_session_cache()
-            log.info("Created session %s for thread %s", session_id[:8], thread_id[:8])
+            log.info("Created session %s (model=%s) for thread %s", session_id[:8], session_model, thread_id[:8])
             return session_id
         else:
             log.error("Failed to create session: %s %s", resp.status_code, resp.text[:200])
@@ -300,6 +332,13 @@ def get_or_create_session(thread_id: str) -> str:
         log.error("Session creation failed: %s", exc)
 
     raise RuntimeError(f"Cannot get or create session for thread {thread_id}")
+
+def _session_model(thread_id: str):
+    '''Return the cached model string for thread_id, or None if unknown.'''
+    entry = _session_cache.get(thread_id)
+    if isinstance(entry, dict):
+        return entry.get("model")
+    return None
 
 # ---------------------------------------------------------------------------
 # HTTP helpers (Multica)
@@ -329,20 +368,36 @@ def http_post(path: str, body: dict) -> dict:
 # Hermes brain — persistent session via API server
 # ---------------------------------------------------------------------------
 
-def _post_message(thread_id: str, body: str, role: str = "assistant") -> dict:
-    """Post a single message to Multica hermes-messages endpoint with role."""
-    return http_post(
-        "/api/plugins/hive/hermes-messages",
-        {
-            "thread_id": thread_id,
-            "workspace_id": CONFIG["HERMES_WORKSPACE_ID"],
-            "body": body,
-            "role": role,
-        },
-    )
+def _post_message(
+    thread_id: str,
+    body: str,
+    role: str = "assistant",
+    *,
+    tokens_used=None,
+    context_window=None,
+    model=None,
+) -> dict:
+    """Post a single message to Multica hermes-messages endpoint with role.
+
+    tokens_used, context_window, and model are optional — each is included in the
+    POST body only when not None so callers that don't have usage info still work.
+    """
+    payload: dict = {
+        "thread_id": thread_id,
+        "workspace_id": CONFIG["HERMES_WORKSPACE_ID"],
+        "body": body,
+        "role": role,
+    }
+    if tokens_used is not None:
+        payload["tokens_used"] = tokens_used
+    if context_window is not None:
+        payload["context_window"] = context_window
+    if model is not None:
+        payload["model"] = model
+    return http_post("/api/plugins/hive/hermes-messages", payload)
 
 
-def hermes_respond_sse(thread_id: str, incoming_body: str, session_id: str) -> None:
+def hermes_respond_sse(thread_id: str, incoming_body: str, session_id: str, model=None) -> None:
     """
     Stream a Hermes turn via SSE (POST .../chat/stream), posting discrete messages
     to Multica as events arrive.
@@ -350,7 +405,8 @@ def hermes_respond_sse(thread_id: str, incoming_body: str, session_id: str) -> N
     Decision: path A — post-on-complete, NO PATCH, NO live token streaming.
     - tool/thinking lines post live as compact single messages.
     - assistant prose posts as ONE message when run.completed fires.
-    - TODO(s7): populate tokens_used/context_window from run.completed usage payload.
+    - s7: tokens_used (turn delta), context_window, and model populated from
+          run.completed usage payload and the session-model cache.
     """
     url = f"{CONFIG['HERMES_API_URL']}/api/sessions/{session_id}/chat/stream"
     try:
@@ -454,13 +510,41 @@ def hermes_respond_sse(thread_id: str, incoming_body: str, session_id: str) -> N
         elif ev == "run.completed":
             # Post the assistant message NOW (one message for the whole turn)
             msg_content = final_content or text_buffer
-            # TODO(s7): extract usage = payload.get("usage", {}) and pass
-            #           tokens_used / context_window to _post_message once
-            #           the server endpoint accepts them.
+            # s7: compute per-turn token delta from cumulative session totals
+            usage = payload.get("usage", {}) or {}
+            raw = usage.get("input_tokens")
+            turn_tokens = None
+            if raw is not None:
+                try:
+                    cur_input = int(raw)
+                except (TypeError, ValueError):
+                    cur_input = None
+                if cur_input is not None:
+                    prev = _prev_input_tokens.get(session_id, 0)
+                    if cur_input < prev:
+                        # session reset / context compaction boundary
+                        turn_tokens = cur_input
+                    else:
+                        turn_tokens = cur_input - prev
+                    # ALWAYS update watermark when a numeric value is present (incl 0)
+                    if session_id not in _prev_input_tokens and len(_prev_input_tokens) >= 1000:
+                        # soft cap: clear ~half to bound memory; dropped sessions recount from 0
+                        keys = list(_prev_input_tokens.keys())
+                        for k in keys[:500]:
+                            del _prev_input_tokens[k]
+                    _prev_input_tokens[session_id] = cur_input
+            # s7: context window from model→window map; model from caller (session-create cache)
+            ctx_window = MODEL_CONTEXT_WINDOWS.get(model) if model else None
             if msg_content:
                 try:
-                    result = _post_message(thread_id, msg_content, role="assistant")
-                    log.info("SSE run done, assistant message posted: %s", result.get("ID", "?")[:8])
+                    result = _post_message(
+                        thread_id, msg_content, role="assistant",
+                        tokens_used=turn_tokens,
+                        context_window=ctx_window,
+                        model=model,
+                    )
+                    log.info("SSE run done, assistant message posted: %s (tokens=%s model=%s)",
+                             result.get("ID", "?")[:8], turn_tokens, model)
                 except Exception as e:
                     log.error("Failed to post assistant message on run.completed: %s", e)
                     raise
@@ -512,7 +596,10 @@ def hermes_respond_sse(thread_id: str, incoming_body: str, session_id: str) -> N
         if rescue_content:
             log.warning("SSE stream ended without run.completed — posting buffered assistant text")
             try:
-                _post_message(thread_id, rescue_content, role="assistant")
+                _post_message(
+                    thread_id, rescue_content, role="assistant",
+                    model=model,  # s7: pass model if available; tokens unknown in guard path
+                )
                 _set_thread_status(thread_id, "posting")
             except Exception as e:
                 log.error("Failed to post rescued assistant content: %s", e)
@@ -551,7 +638,7 @@ def handle_message(msg: dict):
 
     # Handle 404 (session expired) by recreating once before giving up
     try:
-        hermes_respond_sse(thread_id, body, session_id)
+        hermes_respond_sse(thread_id, body, session_id, model=_session_model(thread_id))
     except requests.HTTPError as e:
         if e.response is not None and e.response.status_code == 404:
             log.warning("Session %s not found, recreating for thread %s", session_id[:8], thread_id[:8])
@@ -559,7 +646,7 @@ def handle_message(msg: dict):
             _save_session_cache()
             session_id = get_or_create_session(thread_id)
             try:
-                hermes_respond_sse(thread_id, body, session_id)
+                hermes_respond_sse(thread_id, body, session_id, model=_session_model(thread_id))
             except Exception as e2:
                 log.error("SSE retry after session recreate failed: %s", e2)
                 _set_thread_status(thread_id, "error", message_id=msg_id, error=str(e2))

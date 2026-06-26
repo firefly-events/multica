@@ -465,12 +465,13 @@ func handleListMessages(store *Store) http.HandlerFunc {
 }
 
 type createMessageRequest struct {
-	ThreadID      string `json:"thread_id"`
-	WorkspaceID   string `json:"workspace_id"`
-	Body          string `json:"body"`
-	Role          string `json:"role"`           // optional; defaults to "assistant"
-	TokensUsed    *int   `json:"tokens_used"`    // optional message-level token count
-	ContextWindow *int   `json:"context_window"` // optional context window size
+	ThreadID      string  `json:"thread_id"`
+	WorkspaceID   string  `json:"workspace_id"`
+	Body          string  `json:"body"`
+	Role          string  `json:"role"`           // optional; defaults to "assistant"
+	TokensUsed    *int    `json:"tokens_used"`    // optional message-level token count
+	ContextWindow *int    `json:"context_window"` // optional context window size
+	Model         *string `json:"model"`          // optional model identifier
 }
 
 func handleCreateMessage(store *Store, hub realtime.Broadcaster) http.HandlerFunc {
@@ -504,7 +505,7 @@ func handleCreateMessage(store *Store, hub realtime.Broadcaster) http.HandlerFun
 		if role == "" {
 			role = "assistant" // back-compat default
 		}
-		msg, err := store.CreateMessage(r.Context(), wsID, req.ThreadID, authorID, req.Body, role, req.TokensUsed, req.ContextWindow)
+		msg, err := store.CreateMessage(r.Context(), wsID, req.ThreadID, authorID, req.Body, role, req.TokensUsed, req.ContextWindow, req.Model)
 		if err != nil {
 			if errors.Is(err, ErrThreadNotInWorkspace) {
 				http.Error(w, `{"error":"thread not found"}`, http.StatusNotFound)

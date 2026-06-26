@@ -246,6 +246,7 @@ type HermesMessage struct {
 	Role          string
 	TokensUsed    *int
 	ContextWindow *int
+	Model         *string
 }
 
 // ListThreads returns all threads for a workspace, newest first.
@@ -303,7 +304,7 @@ func (s *Store) ListMessages(ctx context.Context, workspaceID, threadID, beforeT
 
 	if beforeTS != "" && beforeID != "" {
 		rows, qErr = s.pool.Query(ctx, `
-			SELECT id::text, thread_id::text, workspace_id::text, author_id, body, created_at::text, role, tokens_used, context_window
+			SELECT id::text, thread_id::text, workspace_id::text, author_id, body, created_at::text, role, tokens_used, context_window, model
 			FROM hive.hermes_messages
 			WHERE thread_id = $1::uuid
 			  AND workspace_id = $2::uuid
@@ -313,7 +314,7 @@ func (s *Store) ListMessages(ctx context.Context, workspaceID, threadID, beforeT
 		`, threadID, workspaceID, beforeTS, beforeID, limit)
 	} else {
 		rows, qErr = s.pool.Query(ctx, `
-			SELECT id::text, thread_id::text, workspace_id::text, author_id, body, created_at::text, role, tokens_used, context_window
+			SELECT id::text, thread_id::text, workspace_id::text, author_id, body, created_at::text, role, tokens_used, context_window, model
 			FROM hive.hermes_messages
 			WHERE thread_id = $1::uuid
 			  AND workspace_id = $2::uuid
@@ -329,7 +330,7 @@ func (s *Store) ListMessages(ctx context.Context, workspaceID, threadID, beforeT
 	var msgs []HermesMessage
 	for rows.Next() {
 		var m HermesMessage
-		if err := rows.Scan(&m.ID, &m.ThreadID, &m.WorkspaceID, &m.AuthorID, &m.Body, &m.CreatedAt, &m.Role, &m.TokensUsed, &m.ContextWindow); err != nil {
+		if err := rows.Scan(&m.ID, &m.ThreadID, &m.WorkspaceID, &m.AuthorID, &m.Body, &m.CreatedAt, &m.Role, &m.TokensUsed, &m.ContextWindow, &m.Model); err != nil {
 			return nil, fmt.Errorf("hive: scan message: %w", err)
 		}
 		msgs = append(msgs, m)
@@ -345,7 +346,7 @@ var ErrThreadNotInWorkspace = errors.New("hive: thread not found in workspace")
 // the thread belongs to workspaceID before inserting, preventing cross-workspace writes.
 // role defaults to "assistant" if empty. tokensUsed and contextWindow are optional
 // (nil leaves the DB column at its default/NULL).
-func (s *Store) CreateMessage(ctx context.Context, workspaceID, threadID, authorID, body, role string, tokensUsed, contextWindow *int) (HermesMessage, error) {
+func (s *Store) CreateMessage(ctx context.Context, workspaceID, threadID, authorID, body, role string, tokensUsed, contextWindow *int, model *string) (HermesMessage, error) {
 	role = strings.TrimSpace(role)
 	if role == "" {
 		role = "assistant"
@@ -354,13 +355,13 @@ func (s *Store) CreateMessage(ctx context.Context, workspaceID, threadID, author
 	// The INSERT selects workspace_id directly from hermes_threads scoped by both
 	// thread id and workspace, so a thread in another workspace returns zero rows.
 	err := s.pool.QueryRow(ctx, `
-		INSERT INTO hive.hermes_messages (thread_id, workspace_id, author_id, body, role, tokens_used, context_window)
-		SELECT $1::uuid, t.workspace_id, $3, $4, $5, $6, $7
+		INSERT INTO hive.hermes_messages (thread_id, workspace_id, author_id, body, role, tokens_used, context_window, model)
+		SELECT $1::uuid, t.workspace_id, $3, $4, $5, $6, $7, $8
 		FROM hive.hermes_threads t
 		WHERE t.id = $1::uuid AND t.workspace_id = $2::uuid
-		RETURNING id::text, thread_id::text, workspace_id::text, author_id, body, created_at::text, role, tokens_used, context_window
-	`, threadID, workspaceID, authorID, body, role, tokensUsed, contextWindow).Scan(
-		&m.ID, &m.ThreadID, &m.WorkspaceID, &m.AuthorID, &m.Body, &m.CreatedAt, &m.Role, &m.TokensUsed, &m.ContextWindow,
+		RETURNING id::text, thread_id::text, workspace_id::text, author_id, body, created_at::text, role, tokens_used, context_window, model
+	`, threadID, workspaceID, authorID, body, role, tokensUsed, contextWindow, model).Scan(
+		&m.ID, &m.ThreadID, &m.WorkspaceID, &m.AuthorID, &m.Body, &m.CreatedAt, &m.Role, &m.TokensUsed, &m.ContextWindow, &m.Model,
 	)
 	if err != nil {
 		if err == pgx.ErrNoRows {
