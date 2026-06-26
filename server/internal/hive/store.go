@@ -230,22 +230,27 @@ type HermesThread struct {
 	Title       string
 	CreatedBy   string
 	CreatedAt   string
+	Model       *string
+	TokensTotal *int
 }
 
 // HermesMessage is a single row from hive.hermes_messages.
 type HermesMessage struct {
-	ID          string
-	ThreadID    string
-	WorkspaceID string
-	AuthorID    string
-	Body        string
-	CreatedAt   string
+	ID            string
+	ThreadID      string
+	WorkspaceID   string
+	AuthorID      string
+	Body          string
+	CreatedAt     string
+	Role          string
+	TokensUsed    *int
+	ContextWindow *int
 }
 
 // ListThreads returns all threads for a workspace, newest first.
 func (s *Store) ListThreads(ctx context.Context, workspaceID string) ([]HermesThread, error) {
 	rows, err := s.pool.Query(ctx, `
-		SELECT id::text, workspace_id::text, title, created_by, created_at::text
+		SELECT id::text, workspace_id::text, title, created_by, created_at::text, model, tokens_total
 		FROM hive.hermes_threads
 		WHERE workspace_id = $1::uuid
 		ORDER BY created_at DESC
@@ -258,7 +263,7 @@ func (s *Store) ListThreads(ctx context.Context, workspaceID string) ([]HermesTh
 	var threads []HermesThread
 	for rows.Next() {
 		var t HermesThread
-		if err := rows.Scan(&t.ID, &t.WorkspaceID, &t.Title, &t.CreatedBy, &t.CreatedAt); err != nil {
+		if err := rows.Scan(&t.ID, &t.WorkspaceID, &t.Title, &t.CreatedBy, &t.CreatedAt, &t.Model, &t.TokensTotal); err != nil {
 			return nil, fmt.Errorf("hive: scan thread: %w", err)
 		}
 		threads = append(threads, t)
@@ -272,9 +277,9 @@ func (s *Store) CreateThread(ctx context.Context, workspaceID, title, createdBy 
 	err := s.pool.QueryRow(ctx, `
 		INSERT INTO hive.hermes_threads (workspace_id, title, created_by)
 		VALUES ($1::uuid, $2, $3)
-		RETURNING id::text, workspace_id::text, title, created_by, created_at::text
+		RETURNING id::text, workspace_id::text, title, created_by, created_at::text, model, tokens_total
 	`, workspaceID, title, createdBy).Scan(
-		&t.ID, &t.WorkspaceID, &t.Title, &t.CreatedBy, &t.CreatedAt,
+		&t.ID, &t.WorkspaceID, &t.Title, &t.CreatedBy, &t.CreatedAt, &t.Model, &t.TokensTotal,
 	)
 	if err != nil {
 		return HermesThread{}, fmt.Errorf("hive: create thread: %w", err)
@@ -297,7 +302,7 @@ func (s *Store) ListMessages(ctx context.Context, workspaceID, threadID, beforeT
 
 	if beforeTS != "" && beforeID != "" {
 		rows, qErr = s.pool.Query(ctx, `
-			SELECT id::text, thread_id::text, workspace_id::text, author_id, body, created_at::text
+			SELECT id::text, thread_id::text, workspace_id::text, author_id, body, created_at::text, role, tokens_used, context_window
 			FROM hive.hermes_messages
 			WHERE thread_id = $1::uuid
 			  AND workspace_id = $2::uuid
@@ -307,7 +312,7 @@ func (s *Store) ListMessages(ctx context.Context, workspaceID, threadID, beforeT
 		`, threadID, workspaceID, beforeTS, beforeID, limit)
 	} else {
 		rows, qErr = s.pool.Query(ctx, `
-			SELECT id::text, thread_id::text, workspace_id::text, author_id, body, created_at::text
+			SELECT id::text, thread_id::text, workspace_id::text, author_id, body, created_at::text, role, tokens_used, context_window
 			FROM hive.hermes_messages
 			WHERE thread_id = $1::uuid
 			  AND workspace_id = $2::uuid
@@ -323,7 +328,7 @@ func (s *Store) ListMessages(ctx context.Context, workspaceID, threadID, beforeT
 	var msgs []HermesMessage
 	for rows.Next() {
 		var m HermesMessage
-		if err := rows.Scan(&m.ID, &m.ThreadID, &m.WorkspaceID, &m.AuthorID, &m.Body, &m.CreatedAt); err != nil {
+		if err := rows.Scan(&m.ID, &m.ThreadID, &m.WorkspaceID, &m.AuthorID, &m.Body, &m.CreatedAt, &m.Role, &m.TokensUsed, &m.ContextWindow); err != nil {
 			return nil, fmt.Errorf("hive: scan message: %w", err)
 		}
 		msgs = append(msgs, m)
@@ -346,9 +351,9 @@ func (s *Store) CreateMessage(ctx context.Context, workspaceID, threadID, author
 		SELECT $1::uuid, t.workspace_id, $3, $4
 		FROM hive.hermes_threads t
 		WHERE t.id = $1::uuid AND t.workspace_id = $2::uuid
-		RETURNING id::text, thread_id::text, workspace_id::text, author_id, body, created_at::text
+		RETURNING id::text, thread_id::text, workspace_id::text, author_id, body, created_at::text, role, tokens_used, context_window
 	`, threadID, workspaceID, authorID, body).Scan(
-		&m.ID, &m.ThreadID, &m.WorkspaceID, &m.AuthorID, &m.Body, &m.CreatedAt,
+		&m.ID, &m.ThreadID, &m.WorkspaceID, &m.AuthorID, &m.Body, &m.CreatedAt, &m.Role, &m.TokensUsed, &m.ContextWindow,
 	)
 	if err != nil {
 		if err == pgx.ErrNoRows {

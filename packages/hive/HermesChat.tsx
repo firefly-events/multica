@@ -24,6 +24,8 @@ interface HermesThread {
   Title: string;
   CreatedBy: string;
   CreatedAt: string;
+  Model?: string | null;
+  TokensTotal?: number | null;
 }
 
 interface HermesMessage {
@@ -33,6 +35,9 @@ interface HermesMessage {
   AuthorID: string;
   Body: string;
   CreatedAt: string;
+  Role: string;
+  TokensUsed?: number | null;
+  ContextWindow?: number | null;
 }
 
 interface MessageCreatedPayload {
