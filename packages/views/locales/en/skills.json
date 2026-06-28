@@ -6,10 +6,22 @@
     "new_skill": "New skill",
     "search_placeholder": "Search skills…",
     "scopes": {
-      "all": { "label": "All", "description": "All skills in this workspace" },
-      "used": { "label": "In use", "description": "Skills assigned to at least one agent" },
-      "unused": { "label": "Unused", "description": "Skills not assigned to any agent" },
-      "mine": { "label": "Created by me", "description": "Skills you created" }
+      "all": {
+        "label": "All",
+        "description": "All skills in this workspace"
+      },
+      "used": {
+        "label": "In use",
+        "description": "Skills assigned to at least one agent"
+      },
+      "unused": {
+        "label": "Unused",
+        "description": "Skills not assigned to any agent"
+      },
+      "mine": {
+        "label": "Created by me",
+        "description": "Skills you created"
+      }
     },
     "empty": {
       "title": "No skills yet",
@@ -50,7 +62,8 @@
     "source_runtime_unknown": "From a runtime",
     "source_clawhub": "From ClawHub",
     "source_skills_sh": "From Skills.sh",
-    "source_github": "From GitHub"
+    "source_github": "From GitHub",
+    "no_description": "No description"
   },
   "actions": {
     "row_menu": "Actions",
