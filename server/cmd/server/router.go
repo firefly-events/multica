@@ -24,7 +24,10 @@ import (
 	"github.com/multica-ai/multica/server/internal/featureflagdispatch"
 	"github.com/multica-ai/multica/server/internal/handler"
 	"github.com/multica-ai/multica/server/internal/hive"
+	"github.com/multica-ai/multica/server/internal/integrations/channel"
+	"github.com/multica-ai/multica/server/internal/integrations/channel/engine"
 	"github.com/multica-ai/multica/server/internal/integrations/lark"
+	"github.com/multica-ai/multica/server/internal/integrations/slack"
 
 	obsmetrics "github.com/multica-ai/multica/server/internal/metrics"
 	"github.com/multica-ai/multica/server/internal/middleware"
