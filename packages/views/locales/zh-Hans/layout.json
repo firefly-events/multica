@@ -10,7 +10,9 @@
     "usage": "用量",
     "runtimes": "运行时",
     "skills": "Skills",
-    "settings": "设置"
+    "command": "命令中心",
+    "settings": "设置",
+    "approvals": "审批"
   },
   "help": {
     "trigger": "帮助",

@@ -1,0 +1,53 @@
+{
+  "page": {
+    "title": "承認",
+    "tagline": "承認リクエストをレビューしてアクションしてください。"
+  },
+  "tabs": {
+    "pending": "承認待ち",
+    "history": "履歴"
+  },
+  "table": {
+    "action": "アクション",
+    "requested_by": "リクエスト者",
+    "requested_at": "リクエスト日時",
+    "mode": "モード",
+    "decision": "決定",
+    "resolved_at": "解決日時",
+    "approver": "承認者"
+  },
+  "mode": {
+    "human-gate": "ヒューマンゲート",
+    "agent-quorum": "エージェント定足数",
+    "multi-agent-vote": "マルチエージェント投票"
+  },
+  "action_dialog": {
+    "title_approve": "リクエストを承認",
+    "title_reject": "リクエストを拒否",
+    "approver_label": "あなたの名前",
+    "approver_placeholder": "名前を入力してください",
+    "note_label": "メモ（任意）",
+    "note_placeholder": "理由やコンテキスト…",
+    "confirm_approve": "承認",
+    "confirm_reject": "拒否",
+    "cancel": "キャンセル"
+  },
+  "decision": {
+    "allowed": "承認済み",
+    "denied": "拒否済み"
+  },
+  "empty": {
+    "pending_title": "承認待ちはありません",
+    "pending_body": "サインオフが必要なアクションがここに表示されます。",
+    "history_title": "決定が記録されていません",
+    "history_body": "解決済みの承認と監査証跡がここに表示されます。"
+  },
+  "error": {
+    "load": "承認を読み込めませんでした。",
+    "submit": "決定を送信できませんでした。",
+    "retry": "再試行"
+  },
+  "badge": {
+    "pending": "承認待ち"
+  }
+}

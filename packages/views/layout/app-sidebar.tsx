@@ -31,9 +31,12 @@ import {
   CircleUser,
   FolderKanban,
   BarChart3,
+  Radar,
   X,
   Zap,
   Users,
+  Plug,
+  ShieldCheck,
 } from "lucide-react";
 import { WorkspaceAvatar } from "../workspace/workspace-avatar";
 import { ActorAvatar } from "@multica/ui/components/common/actor-avatar";
@@ -115,7 +118,9 @@ type NavKey =
   | "usage"
   | "runtimes"
   | "skills"
-  | "settings";
+  | "command"
+  | "settings"
+  | "approvals";
 
 // Static schema (key + icon) — labels resolved at render via useT("layout").
 type NavLabelKey =
@@ -129,7 +134,9 @@ type NavLabelKey =
   | "usage"
   | "runtimes"
   | "skills"
-  | "settings";
+  | "command"
+  | "settings"
+  | "approvals";
 
 const personalNav: { key: NavKey; labelKey: NavLabelKey; icon: typeof Inbox }[] = [
   { key: "inbox", labelKey: "inbox", icon: Inbox },
@@ -143,6 +150,8 @@ const workspaceNav: { key: NavKey; labelKey: NavLabelKey; icon: typeof Inbox }[]
   { key: "agents", labelKey: "agents", icon: Bot },
   { key: "squads", labelKey: "squads", icon: Users },
   { key: "usage", labelKey: "usage", icon: BarChart3 },
+  { key: "approvals", labelKey: "approvals", icon: ShieldCheck },
+  { key: "command", labelKey: "command", icon: Radar },
 ];
 
 const configureNav: { key: NavKey; labelKey: NavLabelKey; icon: typeof Inbox }[] = [
@@ -407,6 +416,25 @@ export function AppSidebar({ topSlot, searchSlot, headerClassName, headerStyle }
       reorderPins.mutate(reordered);
     },
     [localPinned, reorderPins],
+  );
+
+  const { data: installedPlugins = [] } = useQuery<
+    Array<{ manifest: Record<string, unknown>; enabled: boolean }>
+  >({
+    queryKey: ["plugins"],
+    queryFn: async () => {
+      const res = await fetch("/api/plugins");
+      if (!res.ok) return [];
+      return res.json();
+    },
+    staleTime: 30_000,
+  });
+  const enabledPluginTabs = installedPlugins.filter(
+    (p) =>
+      p.enabled &&
+      p.manifest.ui != null &&
+      typeof (p.manifest.ui as Record<string, unknown>).tab === "string" &&
+      typeof (p.manifest.ui as Record<string, unknown>).url === "string",
   );
 
   const queryClient = useQueryClient();
@@ -729,6 +757,37 @@ export function AppSidebar({ topSlot, searchSlot, headerClassName, headerStyle }
               </SidebarMenu>
             </SidebarGroupContent>
           </SidebarGroup>
+
+          {enabledPluginTabs.length > 0 && (
+            <SidebarGroup>
+              <SidebarGroupLabel>{t(($) => $.sidebar.plugins_group)}</SidebarGroupLabel>
+              <SidebarGroupContent>
+                <SidebarMenu className="gap-0.5">
+                  {enabledPluginTabs.map((p) => {
+                    const ui = p.manifest.ui as Record<string, string>;
+                    return (
+                      <SidebarMenuItem key={p.manifest.name as string}>
+                        <SidebarMenuButton
+                          size="sm"
+                          render={
+                            <a
+                              href={ui.url}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                            />
+                          }
+                          className="text-muted-foreground hover:bg-sidebar-accent/70"
+                        >
+                          <Plug className="shrink-0" />
+                          <span>{ui.tab}</span>
+                        </SidebarMenuButton>
+                      </SidebarMenuItem>
+                    );
+                  })}
+                </SidebarMenu>
+              </SidebarGroupContent>
+            </SidebarGroup>
+          )}
         </SidebarContent>
 
         <SidebarFooter className="p-2">

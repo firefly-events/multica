@@ -1,0 +1,53 @@
+{
+  "page": {
+    "title": "审批",
+    "tagline": "查看并处理待审批请求。"
+  },
+  "tabs": {
+    "pending": "待审批",
+    "history": "历史"
+  },
+  "table": {
+    "action": "操作",
+    "requested_by": "请求者",
+    "requested_at": "请求时间",
+    "mode": "模式",
+    "decision": "决定",
+    "resolved_at": "解决时间",
+    "approver": "审批者"
+  },
+  "mode": {
+    "human-gate": "人工审核",
+    "agent-quorum": "代理仲裁",
+    "multi-agent-vote": "多代理投票"
+  },
+  "action_dialog": {
+    "title_approve": "批准请求",
+    "title_reject": "拒绝请求",
+    "approver_label": "您的姓名",
+    "approver_placeholder": "请输入姓名",
+    "note_label": "备注（可选）",
+    "note_placeholder": "原因或上下文…",
+    "confirm_approve": "批准",
+    "confirm_reject": "拒绝",
+    "cancel": "取消"
+  },
+  "decision": {
+    "allowed": "已批准",
+    "denied": "已拒绝"
+  },
+  "empty": {
+    "pending_title": "暂无待审批",
+    "pending_body": "需要签核的操作将显示在此处。",
+    "history_title": "暂无决定记录",
+    "history_body": "已解决的审批及其审计记录将显示在此处。"
+  },
+  "error": {
+    "load": "无法加载审批。",
+    "submit": "无法提交决定。",
+    "retry": "重试"
+  },
+  "badge": {
+    "pending": "待处理"
+  }
+}

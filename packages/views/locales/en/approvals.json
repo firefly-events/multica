@@ -1,0 +1,53 @@
+{
+  "page": {
+    "title": "Approvals",
+    "tagline": "Review and action pending approval requests."
+  },
+  "tabs": {
+    "pending": "Pending",
+    "history": "History"
+  },
+  "table": {
+    "action": "Action",
+    "requested_by": "Requested by",
+    "requested_at": "Requested",
+    "mode": "Mode",
+    "decision": "Decision",
+    "resolved_at": "Resolved",
+    "approver": "Approver"
+  },
+  "mode": {
+    "human-gate": "Human gate",
+    "agent-quorum": "Agent quorum",
+    "multi-agent-vote": "Multi-agent vote"
+  },
+  "action_dialog": {
+    "title_approve": "Approve request",
+    "title_reject": "Reject request",
+    "approver_label": "Your name",
+    "approver_placeholder": "Enter your name",
+    "note_label": "Note (optional)",
+    "note_placeholder": "Reasoning or context…",
+    "confirm_approve": "Approve",
+    "confirm_reject": "Reject",
+    "cancel": "Cancel"
+  },
+  "decision": {
+    "allowed": "Approved",
+    "denied": "Rejected"
+  },
+  "empty": {
+    "pending_title": "No pending approvals",
+    "pending_body": "Actions requiring a sign-off will appear here.",
+    "history_title": "No decisions recorded",
+    "history_body": "Resolved approvals and their audit trail will appear here."
+  },
+  "error": {
+    "load": "Could not load approvals.",
+    "submit": "Could not submit decision.",
+    "retry": "Retry"
+  },
+  "badge": {
+    "pending": "Pending"
+  }
+}

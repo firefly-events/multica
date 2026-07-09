@@ -10,7 +10,9 @@
     "usage": "Usage",
     "runtimes": "Runtimes",
     "skills": "Skills",
-    "settings": "Settings"
+    "command": "Command",
+    "settings": "Settings",
+    "approvals": "Approvals"
   },
   "help": {
     "trigger": "Help",
@@ -36,6 +38,7 @@
     "pinned_label": "Pinned",
     "workspace_group": "Workspace",
     "configure_group": "Configure",
+    "plugins_group": "Plugins",
     "unread_overflow": "99+"
   }
 }

@@ -10,7 +10,9 @@
     "usage": "사용량",
     "runtimes": "런타임",
     "skills": "스킬",
-    "settings": "설정"
+    "command": "커맨드",
+    "settings": "설정",
+    "approvals": "승인"
   },
   "help": {
     "trigger": "도움말",

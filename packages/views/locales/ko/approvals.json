@@ -1,0 +1,53 @@
+{
+  "page": {
+    "title": "승인",
+    "tagline": "대기 중인 승인 요청을 검토하고 처리하세요."
+  },
+  "tabs": {
+    "pending": "대기 중",
+    "history": "기록"
+  },
+  "table": {
+    "action": "액션",
+    "requested_by": "요청자",
+    "requested_at": "요청 일시",
+    "mode": "모드",
+    "decision": "결정",
+    "resolved_at": "해결 일시",
+    "approver": "승인자"
+  },
+  "mode": {
+    "human-gate": "인간 게이트",
+    "agent-quorum": "에이전트 쿼럼",
+    "multi-agent-vote": "멀티 에이전트 투표"
+  },
+  "action_dialog": {
+    "title_approve": "요청 승인",
+    "title_reject": "요청 거부",
+    "approver_label": "이름",
+    "approver_placeholder": "이름을 입력하세요",
+    "note_label": "메모 (선택사항)",
+    "note_placeholder": "이유 또는 컨텍스트…",
+    "confirm_approve": "승인",
+    "confirm_reject": "거부",
+    "cancel": "취소"
+  },
+  "decision": {
+    "allowed": "승인됨",
+    "denied": "거부됨"
+  },
+  "empty": {
+    "pending_title": "대기 중인 승인 없음",
+    "pending_body": "서명이 필요한 액션이 여기에 표시됩니다.",
+    "history_title": "기록된 결정 없음",
+    "history_body": "해결된 승인 및 감사 내역이 여기에 표시됩니다."
+  },
+  "error": {
+    "load": "승인을 불러올 수 없습니다.",
+    "submit": "결정을 제출할 수 없습니다.",
+    "retry": "재시도"
+  },
+  "badge": {
+    "pending": "대기 중"
+  }
+}

@@ -30,6 +30,7 @@
     "./runtimes": "./runtimes/index.ts",
     "./billing": "./billing/index.ts",
     "./dashboard": "./dashboard/index.ts",
+    "./command": "./command/index.ts",
     "./squads": "./squads/index.ts",
     "./squads/components": "./squads/components/index.ts",
     "./workspace/workspace-avatar": "./workspace/workspace-avatar.tsx",
@@ -52,7 +53,8 @@
     "./i18n": "./i18n/index.ts",
     "./attachments": "./attachments/index.ts",
     "./locales": "./locales/index.ts",
-    "./locales/*": "./locales/*"
+    "./locales/*": "./locales/*",
+    "./approvals": "./approvals/index.ts"
   },
   "dependencies": {
     "@base-ui/react": "^1.3.0",
