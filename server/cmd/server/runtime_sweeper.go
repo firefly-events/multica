@@ -60,6 +60,11 @@ const (
 	// ticks and 500 rows/tick we drain 60k rows/hour worst case — plenty
 	// of headroom for the documented backlog without monopolising DB CPU.
 	queuedExpireBatchSize = 500
+	// todoDispatchReclaimBatchSize caps the recovery pass that re-enqueues
+	// todo issues whose prior task failed or vanished. The pass runs every
+	// sweeper tick, so a modest cap repairs wedges quickly without flooding
+	// daemons after an outage.
+	todoDispatchReclaimBatchSize = 50
 )
 
 // runRuntimeSweeper periodically marks runtimes as offline if their
@@ -85,6 +90,7 @@ func runRuntimeSweeper(ctx context.Context, queries *db.Queries, liveness handle
 			sweepStaleRuntimes(ctx, queries, liveness, taskSvc, bus)
 			sweepStaleTasks(ctx, queries, taskSvc, bus)
 			sweepExpiredQueuedTasks(ctx, queries, taskSvc)
+			sweepTodoDispatchReclaim(ctx, queries, taskSvc)
 			gcRuntimes(ctx, queries, bus)
 		}
 	}
@@ -283,6 +289,105 @@ func sweepExpiredQueuedTasks(ctx context.Context, queries *db.Queries, taskSvc *
 	slog.Info("task sweeper: expired stale queued tasks", "count", len(failedTasks))
 	taskSvc.CaptureQueuedExpiredTasks(ctx, failedTasks)
 	taskSvc.HandleFailedTasks(ctx, failedTasks)
+}
+
+type dispatchReclaimStats struct {
+	Scanned   int
+	Reclaimed int
+	Routed    int
+	Failed    int
+	Skipped   map[string]int
+}
+
+func (s *dispatchReclaimStats) skip(reason string) {
+	if s.Skipped == nil {
+		s.Skipped = make(map[string]int)
+	}
+	s.Skipped[reason]++
+}
+
+// sweepTodoDispatchReclaim repairs todo issues whose dispatch path wedged after
+// a failed or missing task row. It reuses TaskService.RerunIssue so recovery
+// preserves the manual rerun contract: fresh session, prior active tasks for the
+// same target cancelled, task events broadcast, and daemon wakeup sent.
+func sweepTodoDispatchReclaim(ctx context.Context, queries *db.Queries, taskSvc *service.TaskService) dispatchReclaimStats {
+	stats := dispatchReclaimStats{Skipped: make(map[string]int)}
+	if taskSvc == nil {
+		stats.skip("task_service_missing")
+		return stats
+	}
+
+	candidates, err := queries.ListTodoDispatchReclaimCandidates(ctx, todoDispatchReclaimBatchSize)
+	if err != nil {
+		stats.Failed++
+		slog.Warn("todo dispatch reclaim: failed to list candidates", "error", err)
+		return stats
+	}
+	stats.Scanned = len(candidates)
+
+	for _, c := range candidates {
+		issueID := c.ID
+		issueKey := util.UUIDToString(issueID)
+		targetAgentID := util.UUIDToString(c.TargetAgentID)
+
+		if c.TargetAgentArchivedAt.Valid {
+			stats.skip("agent_archived")
+			continue
+		}
+		if !c.TargetRuntimeID.Valid {
+			stats.skip("runtime_missing")
+			continue
+		}
+		if !c.TargetRuntimeStatus.Valid || c.TargetRuntimeStatus.String != "online" {
+			stats.skip("runtime_offline")
+			continue
+		}
+		if c.TargetRunningTasks >= c.TargetMaxConcurrentTasks {
+			stats.skip("wip_cap")
+			continue
+		}
+		hasActive, err := queries.HasActiveTaskForIssue(ctx, issueID)
+		if err != nil {
+			stats.Failed++
+			slog.Warn("todo dispatch reclaim: active-task recheck failed",
+				"issue_id", issueKey,
+				"target_agent_id", targetAgentID,
+				"error", err,
+			)
+			continue
+		}
+		if hasActive {
+			stats.skip("active_task_race")
+			continue
+		}
+
+		if _, err := taskSvc.RerunIssue(ctx, issueID, pgtype.UUID{}, pgtype.UUID{}); err != nil {
+			stats.Failed++
+			slog.Warn("todo dispatch reclaim: rerun failed",
+				"issue_id", issueKey,
+				"target_agent_id", targetAgentID,
+				"is_squad_route", c.IsSquadRoute,
+				"error", err,
+			)
+			continue
+		}
+		if c.IsSquadRoute {
+			stats.Routed++
+		} else {
+			stats.Reclaimed++
+		}
+	}
+
+	if stats.Scanned > 0 || stats.Reclaimed > 0 || stats.Routed > 0 || stats.Failed > 0 {
+		slog.Info("todo dispatch reclaim: completed",
+			"scanned", stats.Scanned,
+			"reclaimed", stats.Reclaimed,
+			"routed", stats.Routed,
+			"skipped", stats.Skipped,
+			"failed", stats.Failed,
+		)
+	}
+	return stats
 }
 
 // broadcastFailedTasks is preserved as a thin shim for the integration tests
