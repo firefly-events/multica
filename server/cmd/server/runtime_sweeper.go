@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"time"
 
@@ -307,9 +308,9 @@ func (s *dispatchReclaimStats) skip(reason string) {
 }
 
 // sweepTodoDispatchReclaim repairs todo issues whose dispatch path wedged after
-// a failed or missing task row. It reuses TaskService.RerunIssue so recovery
-// preserves the manual rerun contract: fresh session, prior active tasks for the
-// same target cancelled, task events broadcast, and daemon wakeup sent.
+// a failed or missing task row. The candidate list is a bounded picker only; the
+// service revalidates and enqueues under an issue lock so recovery never cancels
+// a task that raced in after the sweep began.
 func sweepTodoDispatchReclaim(ctx context.Context, queries *db.Queries, taskSvc *service.TaskService) dispatchReclaimStats {
 	stats := dispatchReclaimStats{Skipped: make(map[string]int)}
 	if taskSvc == nil {
@@ -330,40 +331,14 @@ func sweepTodoDispatchReclaim(ctx context.Context, queries *db.Queries, taskSvc 
 		issueKey := util.UUIDToString(issueID)
 		targetAgentID := util.UUIDToString(c.TargetAgentID)
 
-		if c.TargetAgentArchivedAt.Valid {
-			stats.skip("agent_archived")
+		_, isSquadRoute, err := taskSvc.RecoverTodoDispatch(ctx, issueID)
+		if errors.Is(err, service.ErrTodoDispatchReclaimNotEligible) {
+			stats.skip("candidate_changed")
 			continue
 		}
-		if !c.TargetRuntimeID.Valid {
-			stats.skip("runtime_missing")
-			continue
-		}
-		if !c.TargetRuntimeStatus.Valid || c.TargetRuntimeStatus.String != "online" {
-			stats.skip("runtime_offline")
-			continue
-		}
-		if c.TargetRunningTasks >= c.TargetMaxConcurrentTasks {
-			stats.skip("wip_cap")
-			continue
-		}
-		hasActive, err := queries.HasActiveTaskForIssue(ctx, issueID)
 		if err != nil {
 			stats.Failed++
-			slog.Warn("todo dispatch reclaim: active-task recheck failed",
-				"issue_id", issueKey,
-				"target_agent_id", targetAgentID,
-				"error", err,
-			)
-			continue
-		}
-		if hasActive {
-			stats.skip("active_task_race")
-			continue
-		}
-
-		if _, err := taskSvc.RerunIssue(ctx, issueID, pgtype.UUID{}, pgtype.UUID{}); err != nil {
-			stats.Failed++
-			slog.Warn("todo dispatch reclaim: rerun failed",
+			slog.Warn("todo dispatch reclaim: recovery enqueue failed",
 				"issue_id", issueKey,
 				"target_agent_id", targetAgentID,
 				"is_squad_route", c.IsSquadRoute,
@@ -371,7 +346,7 @@ func sweepTodoDispatchReclaim(ctx context.Context, queries *db.Queries, taskSvc 
 			)
 			continue
 		}
-		if c.IsSquadRoute {
+		if isSquadRoute {
 			stats.Routed++
 		} else {
 			stats.Reclaimed++

@@ -578,17 +578,85 @@ SELECT
     a.runtime_id AS target_runtime_id,
     a.max_concurrent_tasks AS target_max_concurrent_tasks,
     ar.status AS target_runtime_status,
-    (
-        SELECT count(*)::int
+    running.target_running_tasks
+FROM candidates
+JOIN agent a ON a.id = candidates.target_agent_id
+JOIN agent_runtime ar ON ar.id = a.runtime_id
+CROSS JOIN LATERAL (
+        SELECT count(*)::int AS target_running_tasks
         FROM agent_task_queue running
         WHERE running.agent_id = candidates.target_agent_id
           AND running.status IN ('dispatched', 'running', 'waiting_local_directory')
-    ) AS target_running_tasks
-FROM candidates
-JOIN agent a ON a.id = candidates.target_agent_id
-LEFT JOIN agent_runtime ar ON ar.id = a.runtime_id
+) running
+WHERE a.archived_at IS NULL
+  AND ar.status = 'online'
+  AND running.target_running_tasks < a.max_concurrent_tasks
 ORDER BY candidates.updated_at ASC
 LIMIT @max_per_tick::int;
+
+-- name: LockTodoDispatchReclaimCandidate :one
+-- Revalidates one reclaim candidate under an issue row lock. The list query is
+-- only a batch picker; this query is the atomic gate immediately before the
+-- recovery enqueue so an assignment change or fresh active task cannot be
+-- cancelled or bypass eligibility.
+WITH locked_issue AS (
+    SELECT *
+    FROM issue
+    WHERE issue.id = $1
+    FOR UPDATE
+),
+candidate AS (
+    SELECT
+        i.*,
+        COALESCE(s.leader_id, i.assignee_id) AS target_agent_id,
+        (i.assignee_type = 'squad')::boolean AS is_squad_route,
+        latest.id AS latest_task_id,
+        COALESCE(latest.status, '') AS latest_task_status,
+        latest.failure_reason AS latest_failure_reason
+    FROM locked_issue i
+    LEFT JOIN squad s
+           ON i.assignee_type = 'squad'
+          AND s.id = i.assignee_id
+          AND s.workspace_id = i.workspace_id
+          AND s.archived_at IS NULL
+    LEFT JOIN LATERAL (
+        SELECT atq.id, atq.status, atq.failure_reason
+        FROM agent_task_queue atq
+        WHERE atq.issue_id = i.id
+          AND atq.agent_id = COALESCE(s.leader_id, i.assignee_id)
+        ORDER BY COALESCE(atq.completed_at, atq.started_at, atq.dispatched_at, atq.created_at) DESC
+        LIMIT 1
+    ) latest ON TRUE
+    WHERE i.status = 'todo'
+      AND i.assignee_type IN ('agent', 'squad')
+      AND i.assignee_id IS NOT NULL
+      AND COALESCE(s.leader_id, i.assignee_id) IS NOT NULL
+      AND NOT EXISTS (
+          SELECT 1 FROM agent_task_queue active
+          WHERE active.issue_id = i.id
+            AND active.status IN ('queued', 'dispatched', 'running', 'waiting_local_directory')
+      )
+      AND (latest.id IS NULL OR latest.status = 'failed')
+)
+SELECT
+    candidate.*,
+    a.archived_at AS target_agent_archived_at,
+    a.runtime_id AS target_runtime_id,
+    a.max_concurrent_tasks AS target_max_concurrent_tasks,
+    ar.status AS target_runtime_status,
+    running.target_running_tasks
+FROM candidate
+JOIN agent a ON a.id = candidate.target_agent_id
+JOIN agent_runtime ar ON ar.id = a.runtime_id
+CROSS JOIN LATERAL (
+        SELECT count(*)::int AS target_running_tasks
+        FROM agent_task_queue running
+        WHERE running.agent_id = candidate.target_agent_id
+          AND running.status IN ('dispatched', 'running', 'waiting_local_directory')
+) running
+WHERE a.archived_at IS NULL
+  AND ar.status = 'online'
+  AND running.target_running_tasks < a.max_concurrent_tasks;
 
 -- name: HasPendingTaskForIssue :one
 -- Returns true if there is a queued or dispatched (but not yet running) task for the issue.

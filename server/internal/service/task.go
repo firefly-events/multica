@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/multica-ai/multica/server/internal/analytics"
 	"github.com/multica-ai/multica/server/internal/events"
@@ -24,6 +25,8 @@ import (
 	"github.com/multica-ai/multica/server/pkg/redact"
 	"github.com/multica-ai/multica/server/pkg/taskfailure"
 )
+
+var ErrTodoDispatchReclaimNotEligible = errors.New("todo dispatch reclaim candidate is no longer eligible")
 
 type TaskService struct {
 	Queries   *db.Queries
@@ -1694,6 +1697,58 @@ func (s *TaskService) enqueueRerunTask(ctx context.Context, issue db.Issue, agen
 		return s.enqueueIssueTask(ctx, issue, triggerCommentID, true)
 	}
 	return s.enqueueMentionTask(ctx, issue, agentID, triggerCommentID, isLeader, true)
+}
+
+// RecoverTodoDispatch enqueues a fresh task for a wedged todo issue without
+// cancelling any task that may have raced in after the sweeper listed it.
+func (s *TaskService) RecoverTodoDispatch(ctx context.Context, issueID pgtype.UUID) (*db.AgentTaskQueue, bool, error) {
+	var (
+		task         db.AgentTaskQueue
+		isSquadRoute bool
+	)
+
+	if err := s.runInTx(ctx, func(q *db.Queries) error {
+		candidate, err := q.LockTodoDispatchReclaimCandidate(ctx, issueID)
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return ErrTodoDispatchReclaimNotEligible
+			}
+			return fmt.Errorf("lock reclaim candidate: %w", err)
+		}
+
+		created, err := q.CreateAgentTask(ctx, db.CreateAgentTaskParams{
+			AgentID:           candidate.TargetAgentID,
+			RuntimeID:         candidate.TargetRuntimeID,
+			IssueID:           candidate.ID,
+			Priority:          priorityToInt(candidate.Priority),
+			ForceFreshSession: pgtype.Bool{Bool: true, Valid: true},
+			IsLeaderTask:      pgtype.Bool{Bool: candidate.IsSquadRoute, Valid: candidate.IsSquadRoute},
+		})
+		if err != nil {
+			var pgErr *pgconn.PgError
+			if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+				return ErrTodoDispatchReclaimNotEligible
+			}
+			return fmt.Errorf("create recovery task: %w", err)
+		}
+
+		task = created
+		isSquadRoute = candidate.IsSquadRoute
+		return nil
+	}); err != nil {
+		return nil, false, err
+	}
+
+	s.captureTaskQueued(ctx, task)
+	slog.Info("todo dispatch recovery task enqueued",
+		"task_id", util.UUIDToString(task.ID),
+		"issue_id", util.UUIDToString(task.IssueID),
+		"agent_id", util.UUIDToString(task.AgentID),
+		"is_squad_route", isSquadRoute,
+	)
+	s.broadcastTaskEvent(ctx, protocol.EventTaskQueued, task)
+	s.NotifyTaskEnqueued(ctx, task)
+	return &task, isSquadRoute, nil
 }
 
 // HandleFailedTasks runs the post-failure side effects for a batch of

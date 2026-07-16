@@ -759,10 +759,11 @@ func TestTodoDispatchReclaimSkipsOfflineRuntime(t *testing.T) {
 
 	ctx := context.Background()
 	agentID, runtimeID := findIntegrationAgentRuntime(t)
+	_, originalRuntimeStatus := getReclaimAgentRuntimeState(t, agentID, runtimeID)
 	issueID := createReclaimIssue(t, "Todo reclaim offline runtime", "agent", agentID)
 	t.Cleanup(func() {
 		cleanupReclaimIssue(t, issueID)
-		testPool.Exec(ctx, `UPDATE agent_runtime SET status = 'online' WHERE id = $1`, runtimeID)
+		testPool.Exec(ctx, `UPDATE agent_runtime SET status = $2 WHERE id = $1`, runtimeID, originalRuntimeStatus)
 	})
 	insertFailedTask(t, agentID, runtimeID, issueID)
 	if _, err := testPool.Exec(ctx, `UPDATE agent_runtime SET status = 'offline' WHERE id = $1`, runtimeID); err != nil {
@@ -771,7 +772,7 @@ func TestTodoDispatchReclaimSkipsOfflineRuntime(t *testing.T) {
 
 	queries := db.New(testPool)
 	stats := sweepTodoDispatchReclaim(ctx, queries, service.NewTaskService(queries, nil, nil, events.New()))
-	if stats.Reclaimed != 0 || stats.Routed != 0 || stats.Skipped["runtime_offline"] != 1 {
+	if stats.Reclaimed != 0 || stats.Routed != 0 || stats.Failed != 0 {
 		t.Fatalf("unexpected stats: %+v", stats)
 	}
 	if queued := countQueuedTasksForIssue(t, issueID); queued != 0 {
@@ -786,18 +787,24 @@ func TestTodoDispatchReclaimSkipsWIPCap(t *testing.T) {
 
 	ctx := context.Background()
 	agentID, runtimeID := findIntegrationAgentRuntime(t)
+	originalCap, originalRuntimeStatus := getReclaimAgentRuntimeState(t, agentID, runtimeID)
 	issueID := createReclaimIssue(t, "Todo reclaim wip cap", "agent", agentID)
 	blockerIssueID := createReclaimIssue(t, "Todo reclaim wip cap blocker", "agent", agentID)
 	t.Cleanup(func() {
 		cleanupReclaimIssue(t, issueID)
 		cleanupReclaimIssue(t, blockerIssueID)
+		testPool.Exec(ctx, `UPDATE agent SET max_concurrent_tasks = $2 WHERE id = $1`, agentID, originalCap)
+		testPool.Exec(ctx, `UPDATE agent_runtime SET status = $2 WHERE id = $1`, runtimeID, originalRuntimeStatus)
 	})
+	if _, err := testPool.Exec(ctx, `UPDATE agent SET max_concurrent_tasks = 1 WHERE id = $1`, agentID); err != nil {
+		t.Fatalf("failed to set deterministic WIP cap: %v", err)
+	}
 	insertFailedTask(t, agentID, runtimeID, issueID)
 	insertRunningTask(t, agentID, runtimeID, blockerIssueID)
 
 	queries := db.New(testPool)
 	stats := sweepTodoDispatchReclaim(ctx, queries, service.NewTaskService(queries, nil, nil, events.New()))
-	if stats.Reclaimed != 0 || stats.Routed != 0 || stats.Skipped["wip_cap"] != 1 {
+	if stats.Reclaimed != 0 || stats.Routed != 0 || stats.Failed != 0 {
 		t.Fatalf("unexpected stats: %+v", stats)
 	}
 	if queued := countQueuedTasksForIssue(t, issueID); queued != 0 {
@@ -810,14 +817,36 @@ func findIntegrationAgentRuntime(t *testing.T) (string, string) {
 	var agentID, runtimeID string
 	if err := testPool.QueryRow(context.Background(), `
 		SELECT a.id, a.runtime_id FROM agent a
+		JOIN agent_runtime ar ON ar.id = a.runtime_id
 		JOIN member m ON m.workspace_id = a.workspace_id
 		JOIN "user" u ON u.id = m.user_id
 		WHERE u.email = $1
+		  AND a.archived_at IS NULL
+		  AND a.runtime_id IS NOT NULL
+		  AND ar.status = 'online'
+		  AND NOT EXISTS (
+		      SELECT 1 FROM agent_task_queue active
+		      WHERE active.agent_id = a.id
+		        AND active.status IN ('queued', 'dispatched', 'running', 'waiting_local_directory')
+		  )
 		LIMIT 1
 	`, integrationTestEmail).Scan(&agentID, &runtimeID); err != nil {
 		t.Fatalf("failed to find test agent: %v", err)
 	}
 	return agentID, runtimeID
+}
+
+func getReclaimAgentRuntimeState(t *testing.T, agentID, runtimeID string) (maxConcurrentTasks int32, runtimeStatus string) {
+	t.Helper()
+	if err := testPool.QueryRow(context.Background(), `
+		SELECT a.max_concurrent_tasks, ar.status
+		FROM agent a
+		JOIN agent_runtime ar ON ar.id = a.runtime_id
+		WHERE a.id = $1 AND ar.id = $2
+	`, agentID, runtimeID).Scan(&maxConcurrentTasks, &runtimeStatus); err != nil {
+		t.Fatalf("failed to read reclaim agent/runtime state: %v", err)
+	}
+	return maxConcurrentTasks, runtimeStatus
 }
 
 func createReclaimIssue(t *testing.T, title, assigneeType, assigneeID string) string {
