@@ -1701,14 +1701,16 @@ func (s *TaskService) enqueueRerunTask(ctx context.Context, issue db.Issue, agen
 
 // RecoverTodoDispatch enqueues a fresh task for a wedged todo issue without
 // cancelling any task that may have raced in after the sweeper listed it.
-func (s *TaskService) RecoverTodoDispatch(ctx context.Context, issueID pgtype.UUID) (*db.AgentTaskQueue, bool, error) {
+// Note: This recovery pass requires in-process TaskService and DB lock access,
+// making it unsuitable for a standard scheduled-autopilot deployment.
+func (s *TaskService) RecoverTodoDispatch(ctx context.Context, issueID pgtype.UUID, cooldownSecs float64) (*db.AgentTaskQueue, bool, error) {
 	var (
 		task         db.AgentTaskQueue
 		isSquadRoute bool
 	)
 
 	if err := s.runInTx(ctx, func(q *db.Queries) error {
-		candidate, err := q.LockTodoDispatchReclaimCandidate(ctx, issueID)
+		candidate, err := q.LockTodoDispatchReclaimCandidate(ctx, db.LockTodoDispatchReclaimCandidateParams{ID: issueID, CooldownSecs: cooldownSecs})
 		if err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
 				return ErrTodoDispatchReclaimNotEligible
@@ -1722,7 +1724,7 @@ func (s *TaskService) RecoverTodoDispatch(ctx context.Context, issueID pgtype.UU
 			IssueID:           candidate.ID,
 			Priority:          priorityToInt(candidate.Priority),
 			ForceFreshSession: pgtype.Bool{Bool: true, Valid: true},
-			IsLeaderTask:      pgtype.Bool{Bool: candidate.IsSquadRoute, Valid: candidate.IsSquadRoute},
+			IsLeaderTask:      pgtype.Bool{Bool: candidate.IsSquadRoute, Valid: true},
 		})
 		if err != nil {
 			var pgErr *pgconn.PgError

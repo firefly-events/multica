@@ -66,6 +66,12 @@ const (
 	// sweeper tick, so a modest cap repairs wedges quickly without flooding
 	// daemons after an outage.
 	todoDispatchReclaimBatchSize = 50
+	// todoDispatchReclaimCooldownSeconds prevents infinite re-enqueue loops
+	// by waiting 15 minutes after a task failure before reclaiming it.
+	todoDispatchReclaimCooldownSeconds = 15 * 60.0
+	// todoDispatchReclaimMaxAttempts is the breaker limit. If an issue fails
+	// this many times, it stops being reclaimed and is marked blocked.
+	todoDispatchReclaimMaxAttempts = 5
 )
 
 // runRuntimeSweeper periodically marks runtimes as offline if their
@@ -318,7 +324,10 @@ func sweepTodoDispatchReclaim(ctx context.Context, queries *db.Queries, taskSvc 
 		return stats
 	}
 
-	candidates, err := queries.ListTodoDispatchReclaimCandidates(ctx, todoDispatchReclaimBatchSize)
+	candidates, err := queries.ListTodoDispatchReclaimCandidates(ctx, db.ListTodoDispatchReclaimCandidatesParams{
+		MaxPerTick:   todoDispatchReclaimBatchSize,
+		CooldownSecs: todoDispatchReclaimCooldownSeconds,
+	})
 	if err != nil {
 		stats.Failed++
 		slog.Warn("todo dispatch reclaim: failed to list candidates", "error", err)
@@ -331,7 +340,22 @@ func sweepTodoDispatchReclaim(ctx context.Context, queries *db.Queries, taskSvc 
 		issueKey := util.UUIDToString(issueID)
 		targetAgentID := util.UUIDToString(c.TargetAgentID)
 
-		_, isSquadRoute, err := taskSvc.RecoverTodoDispatch(ctx, issueID)
+		if c.FailedTasksCount >= todoDispatchReclaimMaxAttempts {
+			stats.skip("breaker_tripped")
+			_, blockErr := queries.UpdateIssueStatus(ctx, db.UpdateIssueStatusParams{
+				ID:          issueID,
+				Status:      "blocked",
+				WorkspaceID: c.WorkspaceID,
+			})
+			if blockErr != nil {
+				slog.Warn("todo dispatch reclaim: failed to block issue", "issue_id", issueKey, "error", blockErr)
+			} else {
+				slog.Info("todo dispatch reclaim: issue tripped breaker and blocked", "issue_id", issueKey, "failed_tasks", c.FailedTasksCount)
+			}
+			continue
+		}
+
+		_, isSquadRoute, err := taskSvc.RecoverTodoDispatch(ctx, issueID, todoDispatchReclaimCooldownSeconds)
 		if errors.Is(err, service.ErrTodoDispatchReclaimNotEligible) {
 			stats.skip("candidate_changed")
 			continue

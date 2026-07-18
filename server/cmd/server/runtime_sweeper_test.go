@@ -896,7 +896,7 @@ func insertFailedTask(t *testing.T, agentID, runtimeID, issueID string) {
 	t.Helper()
 	if _, err := testPool.Exec(context.Background(), `
 		INSERT INTO agent_task_queue (agent_id, runtime_id, issue_id, status, priority, completed_at, error, failure_reason)
-		VALUES ($1, $2, $3, 'failed', 0, now() - interval '1 minute', 'agent failed', 'agent_error')
+		VALUES ($1, $2, $3, 'failed', 0, now() - interval '16 minutes', 'agent failed', 'agent_error')
 	`, agentID, runtimeID, issueID); err != nil {
 		t.Fatalf("failed to insert failed task: %v", err)
 	}

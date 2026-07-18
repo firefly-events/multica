@@ -546,7 +546,8 @@ WITH candidates AS (
         (i.assignee_type = 'squad')::boolean AS is_squad_route,
         latest.id AS latest_task_id,
         COALESCE(latest.status, '') AS latest_task_status,
-        latest.failure_reason AS latest_failure_reason
+        latest.failure_reason AS latest_failure_reason,
+        COALESCE(attempts.failed_tasks_count, 0) AS failed_tasks_count
     FROM issue i
     LEFT JOIN squad s
            ON i.assignee_type = 'squad'
@@ -554,13 +555,20 @@ WITH candidates AS (
           AND s.workspace_id = i.workspace_id
           AND s.archived_at IS NULL
     LEFT JOIN LATERAL (
-        SELECT atq.id, atq.status, atq.failure_reason
+        SELECT atq.id, atq.status, atq.failure_reason, atq.completed_at
         FROM agent_task_queue atq
         WHERE atq.issue_id = i.id
           AND atq.agent_id = COALESCE(s.leader_id, i.assignee_id)
         ORDER BY COALESCE(atq.completed_at, atq.started_at, atq.dispatched_at, atq.created_at) DESC
         LIMIT 1
     ) latest ON TRUE
+    LEFT JOIN LATERAL (
+        SELECT count(*)::int AS failed_tasks_count
+        FROM agent_task_queue atq
+        WHERE atq.issue_id = i.id
+          AND atq.agent_id = COALESCE(s.leader_id, i.assignee_id)
+          AND atq.status = 'failed'
+    ) attempts ON TRUE
     WHERE i.status = 'todo'
       AND i.assignee_type IN ('agent', 'squad')
       AND i.assignee_id IS NOT NULL
@@ -570,7 +578,13 @@ WITH candidates AS (
           WHERE active.issue_id = i.id
             AND active.status IN ('queued', 'dispatched', 'running', 'waiting_local_directory')
       )
-      AND (latest.id IS NULL OR latest.status = 'failed')
+      AND (
+          latest.id IS NULL 
+          OR (
+              latest.status = 'failed' 
+              AND latest.completed_at < now() - make_interval(secs => @cooldown_secs::double precision)
+          )
+      )
 )
 SELECT
     candidates.*,
@@ -612,7 +626,8 @@ candidate AS (
         (i.assignee_type = 'squad')::boolean AS is_squad_route,
         latest.id AS latest_task_id,
         COALESCE(latest.status, '') AS latest_task_status,
-        latest.failure_reason AS latest_failure_reason
+        latest.failure_reason AS latest_failure_reason,
+        COALESCE(attempts.failed_tasks_count, 0) AS failed_tasks_count
     FROM locked_issue i
     LEFT JOIN squad s
            ON i.assignee_type = 'squad'
@@ -620,13 +635,20 @@ candidate AS (
           AND s.workspace_id = i.workspace_id
           AND s.archived_at IS NULL
     LEFT JOIN LATERAL (
-        SELECT atq.id, atq.status, atq.failure_reason
+        SELECT atq.id, atq.status, atq.failure_reason, atq.completed_at
         FROM agent_task_queue atq
         WHERE atq.issue_id = i.id
           AND atq.agent_id = COALESCE(s.leader_id, i.assignee_id)
         ORDER BY COALESCE(atq.completed_at, atq.started_at, atq.dispatched_at, atq.created_at) DESC
         LIMIT 1
     ) latest ON TRUE
+    LEFT JOIN LATERAL (
+        SELECT count(*)::int AS failed_tasks_count
+        FROM agent_task_queue atq
+        WHERE atq.issue_id = i.id
+          AND atq.agent_id = COALESCE(s.leader_id, i.assignee_id)
+          AND atq.status = 'failed'
+    ) attempts ON TRUE
     WHERE i.status = 'todo'
       AND i.assignee_type IN ('agent', 'squad')
       AND i.assignee_id IS NOT NULL
@@ -636,7 +658,13 @@ candidate AS (
           WHERE active.issue_id = i.id
             AND active.status IN ('queued', 'dispatched', 'running', 'waiting_local_directory')
       )
-      AND (latest.id IS NULL OR latest.status = 'failed')
+      AND (
+          latest.id IS NULL 
+          OR (
+              latest.status = 'failed' 
+              AND latest.completed_at < now() - make_interval(secs => @cooldown_secs::double precision)
+          )
+      )
 )
 SELECT
     candidate.*,

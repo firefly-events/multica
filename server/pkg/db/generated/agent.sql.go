@@ -2194,7 +2194,8 @@ WITH candidates AS (
         (i.assignee_type = 'squad')::boolean AS is_squad_route,
         latest.id AS latest_task_id,
         COALESCE(latest.status, '') AS latest_task_status,
-        latest.failure_reason AS latest_failure_reason
+        latest.failure_reason AS latest_failure_reason,
+        COALESCE(attempts.failed_tasks_count, 0) AS failed_tasks_count
     FROM issue i
     LEFT JOIN squad s
            ON i.assignee_type = 'squad'
@@ -2202,13 +2203,20 @@ WITH candidates AS (
           AND s.workspace_id = i.workspace_id
           AND s.archived_at IS NULL
     LEFT JOIN LATERAL (
-        SELECT atq.id, atq.status, atq.failure_reason
+        SELECT atq.id, atq.status, atq.failure_reason, atq.completed_at
         FROM agent_task_queue atq
         WHERE atq.issue_id = i.id
           AND atq.agent_id = COALESCE(s.leader_id, i.assignee_id)
         ORDER BY COALESCE(atq.completed_at, atq.started_at, atq.dispatched_at, atq.created_at) DESC
         LIMIT 1
     ) latest ON TRUE
+    LEFT JOIN LATERAL (
+        SELECT count(*)::int AS failed_tasks_count
+        FROM agent_task_queue atq
+        WHERE atq.issue_id = i.id
+          AND atq.agent_id = COALESCE(s.leader_id, i.assignee_id)
+          AND atq.status = 'failed'
+    ) attempts ON TRUE
     WHERE i.status = 'todo'
       AND i.assignee_type IN ('agent', 'squad')
       AND i.assignee_id IS NOT NULL
@@ -2218,10 +2226,16 @@ WITH candidates AS (
           WHERE active.issue_id = i.id
             AND active.status IN ('queued', 'dispatched', 'running', 'waiting_local_directory')
       )
-      AND (latest.id IS NULL OR latest.status = 'failed')
+      AND (
+          latest.id IS NULL 
+          OR (
+              latest.status = 'failed' 
+              AND latest.completed_at < now() - make_interval(secs => $2::double precision)
+          )
+      )
 )
 SELECT
-    candidates.id, candidates.workspace_id, candidates.title, candidates.description, candidates.status, candidates.priority, candidates.assignee_type, candidates.assignee_id, candidates.creator_type, candidates.creator_id, candidates.parent_issue_id, candidates.acceptance_criteria, candidates.context_refs, candidates.position, candidates.due_date, candidates.created_at, candidates.updated_at, candidates.number, candidates.project_id, candidates.origin_type, candidates.origin_id, candidates.first_executed_at, candidates.start_date, candidates.metadata, candidates.target_agent_id, candidates.is_squad_route, candidates.latest_task_id, candidates.latest_task_status, candidates.latest_failure_reason,
+    candidates.id, candidates.workspace_id, candidates.title, candidates.description, candidates.status, candidates.priority, candidates.assignee_type, candidates.assignee_id, candidates.creator_type, candidates.creator_id, candidates.parent_issue_id, candidates.acceptance_criteria, candidates.context_refs, candidates.position, candidates.due_date, candidates.created_at, candidates.updated_at, candidates.number, candidates.project_id, candidates.origin_type, candidates.origin_id, candidates.first_executed_at, candidates.start_date, candidates.metadata, candidates.target_agent_id, candidates.is_squad_route, candidates.latest_task_id, candidates.latest_task_status, candidates.latest_failure_reason, candidates.failed_tasks_count,
     a.archived_at AS target_agent_archived_at,
     a.runtime_id AS target_runtime_id,
     a.max_concurrent_tasks AS target_max_concurrent_tasks,
@@ -2242,6 +2256,11 @@ WHERE a.archived_at IS NULL
 ORDER BY candidates.updated_at ASC
 LIMIT $1::int
 `
+
+type ListTodoDispatchReclaimCandidatesParams struct {
+	MaxPerTick   int32   `json:"max_per_tick"`
+	CooldownSecs float64 `json:"cooldown_secs"`
+}
 
 type ListTodoDispatchReclaimCandidatesRow struct {
 	ID                       pgtype.UUID        `json:"id"`
@@ -2273,6 +2292,7 @@ type ListTodoDispatchReclaimCandidatesRow struct {
 	LatestTaskID             pgtype.UUID        `json:"latest_task_id"`
 	LatestTaskStatus         string             `json:"latest_task_status"`
 	LatestFailureReason      pgtype.Text        `json:"latest_failure_reason"`
+	FailedTasksCount         int32              `json:"failed_tasks_count"`
 	TargetAgentArchivedAt    pgtype.Timestamptz `json:"target_agent_archived_at"`
 	TargetRuntimeID          pgtype.UUID        `json:"target_runtime_id"`
 	TargetMaxConcurrentTasks int32              `json:"target_max_concurrent_tasks"`
@@ -2285,8 +2305,8 @@ type ListTodoDispatchReclaimCandidatesRow struct {
 // the target agent's latest task failed. Agent-assigned issues target their
 // assignee directly; squad-assigned issues target the squad leader because
 // squad work is leader-routed everywhere else in the product.
-func (q *Queries) ListTodoDispatchReclaimCandidates(ctx context.Context, maxPerTick int32) ([]ListTodoDispatchReclaimCandidatesRow, error) {
-	rows, err := q.db.Query(ctx, listTodoDispatchReclaimCandidates, maxPerTick)
+func (q *Queries) ListTodoDispatchReclaimCandidates(ctx context.Context, arg ListTodoDispatchReclaimCandidatesParams) ([]ListTodoDispatchReclaimCandidatesRow, error) {
+	rows, err := q.db.Query(ctx, listTodoDispatchReclaimCandidates, arg.MaxPerTick, arg.CooldownSecs)
 	if err != nil {
 		return nil, err
 	}
@@ -2324,6 +2344,7 @@ func (q *Queries) ListTodoDispatchReclaimCandidates(ctx context.Context, maxPerT
 			&i.LatestTaskID,
 			&i.LatestTaskStatus,
 			&i.LatestFailureReason,
+			&i.FailedTasksCount,
 			&i.TargetAgentArchivedAt,
 			&i.TargetRuntimeID,
 			&i.TargetMaxConcurrentTasks,
@@ -2438,7 +2459,8 @@ candidate AS (
         (i.assignee_type = 'squad')::boolean AS is_squad_route,
         latest.id AS latest_task_id,
         COALESCE(latest.status, '') AS latest_task_status,
-        latest.failure_reason AS latest_failure_reason
+        latest.failure_reason AS latest_failure_reason,
+        COALESCE(attempts.failed_tasks_count, 0) AS failed_tasks_count
     FROM locked_issue i
     LEFT JOIN squad s
            ON i.assignee_type = 'squad'
@@ -2446,13 +2468,20 @@ candidate AS (
           AND s.workspace_id = i.workspace_id
           AND s.archived_at IS NULL
     LEFT JOIN LATERAL (
-        SELECT atq.id, atq.status, atq.failure_reason
+        SELECT atq.id, atq.status, atq.failure_reason, atq.completed_at
         FROM agent_task_queue atq
         WHERE atq.issue_id = i.id
           AND atq.agent_id = COALESCE(s.leader_id, i.assignee_id)
         ORDER BY COALESCE(atq.completed_at, atq.started_at, atq.dispatched_at, atq.created_at) DESC
         LIMIT 1
     ) latest ON TRUE
+    LEFT JOIN LATERAL (
+        SELECT count(*)::int AS failed_tasks_count
+        FROM agent_task_queue atq
+        WHERE atq.issue_id = i.id
+          AND atq.agent_id = COALESCE(s.leader_id, i.assignee_id)
+          AND atq.status = 'failed'
+    ) attempts ON TRUE
     WHERE i.status = 'todo'
       AND i.assignee_type IN ('agent', 'squad')
       AND i.assignee_id IS NOT NULL
@@ -2462,10 +2491,16 @@ candidate AS (
           WHERE active.issue_id = i.id
             AND active.status IN ('queued', 'dispatched', 'running', 'waiting_local_directory')
       )
-      AND (latest.id IS NULL OR latest.status = 'failed')
+      AND (
+          latest.id IS NULL 
+          OR (
+              latest.status = 'failed' 
+              AND latest.completed_at < now() - make_interval(secs => $2::double precision)
+          )
+      )
 )
 SELECT
-    candidate.id, candidate.workspace_id, candidate.title, candidate.description, candidate.status, candidate.priority, candidate.assignee_type, candidate.assignee_id, candidate.creator_type, candidate.creator_id, candidate.parent_issue_id, candidate.acceptance_criteria, candidate.context_refs, candidate.position, candidate.due_date, candidate.created_at, candidate.updated_at, candidate.number, candidate.project_id, candidate.origin_type, candidate.origin_id, candidate.first_executed_at, candidate.start_date, candidate.metadata, candidate.target_agent_id, candidate.is_squad_route, candidate.latest_task_id, candidate.latest_task_status, candidate.latest_failure_reason,
+    candidate.id, candidate.workspace_id, candidate.title, candidate.description, candidate.status, candidate.priority, candidate.assignee_type, candidate.assignee_id, candidate.creator_type, candidate.creator_id, candidate.parent_issue_id, candidate.acceptance_criteria, candidate.context_refs, candidate.position, candidate.due_date, candidate.created_at, candidate.updated_at, candidate.number, candidate.project_id, candidate.origin_type, candidate.origin_id, candidate.first_executed_at, candidate.start_date, candidate.metadata, candidate.target_agent_id, candidate.is_squad_route, candidate.latest_task_id, candidate.latest_task_status, candidate.latest_failure_reason, candidate.failed_tasks_count,
     a.archived_at AS target_agent_archived_at,
     a.runtime_id AS target_runtime_id,
     a.max_concurrent_tasks AS target_max_concurrent_tasks,
@@ -2484,6 +2519,11 @@ WHERE a.archived_at IS NULL
   AND ar.status = 'online'
   AND running.target_running_tasks < a.max_concurrent_tasks
 `
+
+type LockTodoDispatchReclaimCandidateParams struct {
+	ID           pgtype.UUID `json:"id"`
+	CooldownSecs float64     `json:"cooldown_secs"`
+}
 
 type LockTodoDispatchReclaimCandidateRow struct {
 	ID                       pgtype.UUID        `json:"id"`
@@ -2515,6 +2555,7 @@ type LockTodoDispatchReclaimCandidateRow struct {
 	LatestTaskID             pgtype.UUID        `json:"latest_task_id"`
 	LatestTaskStatus         string             `json:"latest_task_status"`
 	LatestFailureReason      pgtype.Text        `json:"latest_failure_reason"`
+	FailedTasksCount         int32              `json:"failed_tasks_count"`
 	TargetAgentArchivedAt    pgtype.Timestamptz `json:"target_agent_archived_at"`
 	TargetRuntimeID          pgtype.UUID        `json:"target_runtime_id"`
 	TargetMaxConcurrentTasks int32              `json:"target_max_concurrent_tasks"`
@@ -2526,8 +2567,8 @@ type LockTodoDispatchReclaimCandidateRow struct {
 // only a batch picker; this query is the atomic gate immediately before the
 // recovery enqueue so an assignment change or fresh active task cannot be
 // cancelled or bypass eligibility.
-func (q *Queries) LockTodoDispatchReclaimCandidate(ctx context.Context, id pgtype.UUID) (LockTodoDispatchReclaimCandidateRow, error) {
-	row := q.db.QueryRow(ctx, lockTodoDispatchReclaimCandidate, id)
+func (q *Queries) LockTodoDispatchReclaimCandidate(ctx context.Context, arg LockTodoDispatchReclaimCandidateParams) (LockTodoDispatchReclaimCandidateRow, error) {
+	row := q.db.QueryRow(ctx, lockTodoDispatchReclaimCandidate, arg.ID, arg.CooldownSecs)
 	var i LockTodoDispatchReclaimCandidateRow
 	err := row.Scan(
 		&i.ID,
@@ -2559,6 +2600,7 @@ func (q *Queries) LockTodoDispatchReclaimCandidate(ctx context.Context, id pgtyp
 		&i.LatestTaskID,
 		&i.LatestTaskStatus,
 		&i.LatestFailureReason,
+		&i.FailedTasksCount,
 		&i.TargetAgentArchivedAt,
 		&i.TargetRuntimeID,
 		&i.TargetMaxConcurrentTasks,
