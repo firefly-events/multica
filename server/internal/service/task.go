@@ -1936,6 +1936,21 @@ func (s *TaskService) NotifyTaskEnqueued(ctx context.Context, task db.AgentTaskQ
 	s.notifyTaskAvailable(task)
 }
 
+// WakeRuntimeForQueuedTasks is the reconnect/resync counterpart to
+// NotifyTaskEnqueued. Daemon registration does not create a new task row, but a
+// restarted daemon still needs any stale empty-claim verdict invalidated before
+// its reconnect catch-up claim runs.
+func (s *TaskService) WakeRuntimeForQueuedTasks(runtimeID string) {
+	if runtimeID == "" {
+		return
+	}
+	s.EmptyClaim.Bump(context.Background(), runtimeID)
+	if s.Wakeup == nil {
+		return
+	}
+	s.Wakeup.NotifyTaskAvailable(runtimeID, "")
+}
+
 // notifyTaskAvailable runs after a task has been inserted: bumps the
 // runtime's invalidation version so any in-flight claim that is about
 // to write an "empty" verdict will have it rejected on read, then
