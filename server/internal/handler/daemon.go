@@ -406,6 +406,10 @@ func (h *Handler) DaemonRegister(w http.ResponseWriter, r *http.Request) {
 		// the stale row so there's only ever one runtime per machine.
 		h.mergeLegacyRuntimes(r, registered, provider, req.LegacyDaemonIDs)
 
+		if registered.Status == "online" {
+			h.TaskService.WakeRuntimeForQueuedTasks(uuidToString(registered.ID))
+		}
+
 		resp = append(resp, runtimeToResponse(registered))
 	}
 
