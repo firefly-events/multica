@@ -258,6 +258,32 @@ type DaemonToken struct {
 	CreatedAt   pgtype.Timestamptz `json:"created_at"`
 }
 
+type Dashboard struct {
+	ID             pgtype.UUID        `json:"id"`
+	WorkspaceID    pgtype.UUID        `json:"workspace_id"`
+	OwnerID        pgtype.UUID        `json:"owner_id"`
+	Name           string             `json:"name"`
+	Description    pgtype.Text        `json:"description"`
+	Layout         []byte             `json:"layout"`
+	FilterOverride []byte             `json:"filter_override"`
+	DateOverride   []byte             `json:"date_override"`
+	CreatedAt      pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt      pgtype.Timestamptz `json:"updated_at"`
+}
+
+type DashboardTile struct {
+	ID             pgtype.UUID        `json:"id"`
+	WorkspaceID    pgtype.UUID        `json:"workspace_id"`
+	DashboardID    pgtype.UUID        `json:"dashboard_id"`
+	InsightID      pgtype.UUID        `json:"insight_id"`
+	Position       int32              `json:"position"`
+	Layout         []byte             `json:"layout"`
+	FilterOverride []byte             `json:"filter_override"`
+	DateOverride   []byte             `json:"date_override"`
+	CreatedAt      pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt      pgtype.Timestamptz `json:"updated_at"`
+}
+
 type Feedback struct {
 	ID          pgtype.UUID        `json:"id"`
 	UserID      pgtype.UUID        `json:"user_id"`
@@ -331,6 +357,19 @@ type InboxItem struct {
 	ActorType     pgtype.Text        `json:"actor_type"`
 	ActorID       pgtype.UUID        `json:"actor_id"`
 	Details       []byte             `json:"details"`
+}
+
+type Insight struct {
+	ID            pgtype.UUID        `json:"id"`
+	WorkspaceID   pgtype.UUID        `json:"workspace_id"`
+	OwnerID       pgtype.UUID        `json:"owner_id"`
+	Name          string             `json:"name"`
+	ChartType     string             `json:"chart_type"`
+	MetricSpec    []byte             `json:"metric_spec"`
+	DimensionSpec []byte             `json:"dimension_spec"`
+	FilterSpec    []byte             `json:"filter_spec"`
+	CreatedAt     pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt     pgtype.Timestamptz `json:"updated_at"`
 }
 
 type Issue struct {
@@ -548,6 +587,29 @@ type ProjectResource struct {
 	Position     int32              `json:"position"`
 	CreatedAt    pgtype.Timestamptz `json:"created_at"`
 	CreatedBy    pgtype.UUID        `json:"created_by"`
+}
+
+type Report struct {
+	ID          pgtype.UUID        `json:"id"`
+	WorkspaceID pgtype.UUID        `json:"workspace_id"`
+	OwnerID     pgtype.UUID        `json:"owner_id"`
+	Slug        string             `json:"slug"`
+	Type        string             `json:"type"`
+	Title       string             `json:"title"`
+	TemplateRef []byte             `json:"template_ref"`
+	CreatedAt   pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt   pgtype.Timestamptz `json:"updated_at"`
+}
+
+type ReportExecution struct {
+	ID                pgtype.UUID        `json:"id"`
+	WorkspaceID       pgtype.UUID        `json:"workspace_id"`
+	ReportID          pgtype.UUID        `json:"report_id"`
+	OwnerID           pgtype.UUID        `json:"owner_id"`
+	GeneratedAt       pgtype.Timestamptz `json:"generated_at"`
+	ResultsSnapshot   []byte             `json:"results_snapshot"`
+	NarrativeSnapshot []byte             `json:"narrative_snapshot"`
+	CreatedAt         pgtype.Timestamptz `json:"created_at"`
 }
 
 type Skill struct {
