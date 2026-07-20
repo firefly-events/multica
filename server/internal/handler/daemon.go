@@ -323,9 +323,20 @@ func (h *Handler) DaemonRegister(w http.ResponseWriter, r *http.Request) {
 		} else if runtime.Version != "" {
 			deviceInfo = runtime.Version
 		}
+		// Whitelist rather than "anything but offline is online": an
+		// unrecognized status (a typo, or a daemon build sending a status
+		// value this server doesn't know about yet) used to be silently
+		// erased back to "online" here, which would resurrect a runtime the
+		// daemon deliberately marked otherwise. Log instead of silently
+		// discarding it (DOS-1037).
 		status := "online"
-		if runtime.Status == "offline" {
+		switch runtime.Status {
+		case "offline":
 			status = "offline"
+		case "", "online":
+			status = "online"
+		default:
+			slog.Warn("daemon register: unrecognized runtime status, defaulting to online", "status", runtime.Status, "provider", provider)
 		}
 		metadata, _ := json.Marshal(map[string]any{
 			"version":     runtime.Version,
@@ -587,6 +598,43 @@ func (h *Handler) DaemonDeregister(w http.ResponseWriter, r *http.Request) {
 type DaemonHeartbeatRequest struct {
 	RuntimeID           string `json:"runtime_id"`
 	SupportsBatchImport bool   `json:"supports_batch_import,omitempty"`
+	// TokenStatus is the daemon's cached token-guard verdict (DOS-1036) for
+	// this runtime's provider — "online", "offline", or omitted to leave the
+	// runtime's current status untouched (probing disabled or the verdict
+	// was inconclusive). See applyTokenProbeStatus.
+	TokenStatus string `json:"token_status,omitempty"`
+}
+
+// applyTokenProbeStatus flips rt's status based on the daemon-reported
+// token-guard verdict, reusing the existing online/offline gate that
+// service.AgentReadiness already enforces everywhere — no new dispatch
+// mechanism, just another writer of the same column (DOS-1037).
+//
+// tokenStatus == "" (probing disabled, or the verdict was ambiguous/a setup
+// error) is a deliberate no-op: an inconclusive probe must never manufacture
+// a false "offline" for a runtime that was otherwise healthy. Only a
+// confirmed "online"/"offline" verdict that actually differs from the
+// current DB status triggers a write.
+func (h *Handler) applyTokenProbeStatus(ctx context.Context, rt db.AgentRuntime, tokenStatus string) db.AgentRuntime {
+	if tokenStatus == "" || tokenStatus == rt.Status {
+		return rt
+	}
+	switch tokenStatus {
+	case "offline":
+		if err := h.Queries.SetAgentRuntimeOffline(ctx, rt.ID); err != nil {
+			slog.Warn("token probe: failed to mark runtime offline", "runtime_id", uuidToString(rt.ID), "error", err)
+			return rt
+		}
+		rt.Status = "offline"
+	case "online":
+		updated, err := h.Queries.MarkAgentRuntimeOnline(ctx, rt.ID)
+		if err != nil {
+			slog.Warn("token probe: failed to mark runtime online", "runtime_id", uuidToString(rt.ID), "error", err)
+			return rt
+		}
+		rt = updated
+	}
+	return rt
 }
 
 // heartbeatHasPendingTimeout bounds the cheap HasPending probe on the
@@ -717,6 +765,8 @@ func (h *Handler) DaemonHeartbeat(w http.ResponseWriter, r *http.Request) {
 	}
 	authMs = time.Since(start).Milliseconds()
 
+	rt = h.applyTokenProbeStatus(r.Context(), rt, req.TokenStatus)
+
 	ack, m, err := h.processHeartbeat(r.Context(), rt, req.SupportsBatchImport)
 	updateMs = m.UpdateMs
 	probeModelMs = m.ProbeModelMs
@@ -771,7 +821,7 @@ func (h *Handler) DaemonHeartbeat(w http.ResponseWriter, r *http.Request) {
 // and tells the daemon to drop the stale runtime and re-register. Other DB
 // errors still propagate as errors so they keep their existing Warn logging
 // and the daemon does not mistake a hiccup for a deletion.
-func (h *Handler) HandleDaemonWSHeartbeat(ctx context.Context, identity daemonws.ClientIdentity, runtimeID string, supportsBatchImport bool) (*protocol.DaemonHeartbeatAckPayload, error) {
+func (h *Handler) HandleDaemonWSHeartbeat(ctx context.Context, identity daemonws.ClientIdentity, runtimeID string, supportsBatchImport bool, tokenStatus string) (*protocol.DaemonHeartbeatAckPayload, error) {
 	runtimeUUID, err := util.ParseUUID(runtimeID)
 	if err != nil {
 		return nil, fmt.Errorf("invalid runtime_id: %w", err)
@@ -790,6 +840,7 @@ func (h *Handler) HandleDaemonWSHeartbeat(ctx context.Context, identity daemonws
 	if identity.WorkspaceID != "" && identity.WorkspaceID != uuidToString(rt.WorkspaceID) {
 		return nil, fmt.Errorf("runtime not in connection workspace")
 	}
+	rt = h.applyTokenProbeStatus(ctx, rt, tokenStatus)
 	ack, _, err := h.processHeartbeat(ctx, rt, supportsBatchImport)
 	return ack, err
 }

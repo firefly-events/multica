@@ -101,6 +101,9 @@ type Daemon struct {
 	versionsMu    sync.RWMutex      // guards agentVersions
 	agentVersions map[string]string // provider -> detected CLI version (set during registration)
 
+	tokenProbeMu    sync.Mutex
+	tokenProbeCache map[string]tokenProbeCacheEntry // provider -> most recent token-guard verdict
+
 	wsHBMu      sync.RWMutex         // guards wsHBLastAck
 	wsHBLastAck map[string]time.Time // runtime_id -> last successful WS heartbeat ack timestamp
 
@@ -758,11 +761,19 @@ func (d *Daemon) registerRuntimesForWorkspace(ctx context.Context, workspaceID s
 		if d.cfg.DeviceName != "" {
 			displayName = fmt.Sprintf("%s (%s)", displayName, d.cfg.DeviceName)
 		}
+		// Default optimistic ("online") when the probe is disabled or its
+		// verdict is inconclusive — see currentTokenStatus doc. Registration
+		// has no prior status to fall back to, so an inconclusive probe here
+		// starts the runtime online rather than leaving it in limbo.
+		status := d.currentTokenStatus(ctx, name)
+		if status == "" {
+			status = "online"
+		}
 		runtimes = append(runtimes, map[string]string{
 			"name":    displayName,
 			"type":    name,
 			"version": version,
-			"status":  "online",
+			"status":  status,
 		})
 	}
 	if len(runtimes) == 0 {
@@ -1363,7 +1374,11 @@ func (d *Daemon) runHeartbeatTick(ctx context.Context, rid string) {
 		return
 	}
 	d.logger.Debug("heartbeat: HTTP tick", "runtime_id", rid)
-	resp, err := d.client.SendHeartbeat(ctx, rid)
+	tokenStatus := ""
+	if rt := d.findRuntime(rid); rt != nil {
+		tokenStatus = d.currentTokenStatus(ctx, rt.Provider)
+	}
+	resp, err := d.client.SendHeartbeat(ctx, rid, tokenStatus)
 	if err != nil {
 		if ctx.Err() == nil {
 			if isRuntimeNotFoundError(err) {

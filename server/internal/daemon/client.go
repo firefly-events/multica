@@ -290,12 +290,19 @@ type (
 	PendingLocalSkillImport = protocol.DaemonHeartbeatPendingLocalSkillImport
 )
 
-func (c *Client) SendHeartbeat(ctx context.Context, runtimeID string) (*HeartbeatResponse, error) {
+// tokenStatus is the daemon's cached token-guard verdict for the runtime's
+// provider ("online"/"offline"), or "" to leave the server-side status
+// untouched (probing disabled, or an inconclusive verdict).
+func (c *Client) SendHeartbeat(ctx context.Context, runtimeID, tokenStatus string) (*HeartbeatResponse, error) {
 	var resp HeartbeatResponse
-	if err := c.postJSON(ctx, "/api/daemon/heartbeat", map[string]any{
-		"runtime_id":             runtimeID,
-		"supports_batch_import":  true,
-	}, &resp); err != nil {
+	body := map[string]any{
+		"runtime_id":            runtimeID,
+		"supports_batch_import": true,
+	}
+	if tokenStatus != "" {
+		body["token_status"] = tokenStatus
+	}
+	if err := c.postJSON(ctx, "/api/daemon/heartbeat", body, &resp); err != nil {
 		return nil, err
 	}
 	return &resp, nil

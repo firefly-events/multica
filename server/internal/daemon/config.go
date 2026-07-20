@@ -28,6 +28,12 @@ const (
 	// hard ceiling for cost/resource control can set MULTICA_AGENT_TIMEOUT.
 	DefaultAgentTimeout                   = 0
 	DefaultCodexSemanticInactivityTimeout = 10 * time.Minute
+	// DefaultTokenProbeInterval bounds how often the daemon re-runs the
+	// token-guard probe (DOS-1036) per provider. Every heartbeat re-running a
+	// full CLI invocation would be wasteful; this caches the verdict for a
+	// few heartbeat cycles so a token recovers automatically without manual
+	// intervention while staying cheap on the hot path.
+	DefaultTokenProbeInterval = 5 * time.Minute
 	// DefaultAgentIdleWatchdog is the per-task safety net that force-stops a
 	// run when the backend has emitted no message for this long AND its
 	// message queue is empty. Backends like Claude Code can hang indefinitely
@@ -102,6 +108,13 @@ type Config struct {
 	ClaudeArgs                     []string
 	CodexArgs                      []string
 	CodebuddyArgs                  []string
+	// TokenProbeScript is the path to the headless token-validation probe
+	// (bin/token-guard, DOS-1036). Empty (the default) disables probing
+	// entirely — dispatch eligibility behaves exactly as before this feature
+	// (DOS-1037 AC7). Set via MULTICA_TOKEN_PROBE_SCRIPT.
+	TokenProbeScript string
+	// TokenProbeInterval bounds how often a provider's token is re-probed.
+	TokenProbeInterval time.Duration
 }
 
 // Overrides allows CLI flags to override environment variables and defaults.
@@ -471,6 +484,14 @@ func LoadConfig(overrides Overrides) (Config, error) {
 		autoUpdateInterval = overrides.AutoUpdateCheckInterval
 	}
 
+	// Token probe: disabled by default (empty script path = no-op). Operators
+	// wire it up by pointing MULTICA_TOKEN_PROBE_SCRIPT at bin/token-guard.
+	tokenProbeScript := strings.TrimSpace(os.Getenv("MULTICA_TOKEN_PROBE_SCRIPT"))
+	tokenProbeInterval, err := durationFromEnv("MULTICA_TOKEN_PROBE_INTERVAL", DefaultTokenProbeInterval)
+	if err != nil {
+		return Config{}, err
+	}
+
 	return Config{
 		ServerBaseURL:                  serverBaseURL,
 		DaemonID:                       daemonID,
@@ -500,6 +521,8 @@ func LoadConfig(overrides Overrides) (Config, error) {
 		ClaudeArgs:                     claudeArgs,
 		CodexArgs:                      codexArgs,
 		CodebuddyArgs:                  codebuddyArgs,
+		TokenProbeScript:               tokenProbeScript,
+		TokenProbeInterval:             tokenProbeInterval,
 	}, nil
 }
 

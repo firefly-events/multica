@@ -119,6 +119,11 @@ type ChatSessionUpdatedPayload struct {
 type DaemonHeartbeatRequestPayload struct {
 	RuntimeID           string `json:"runtime_id"`
 	SupportsBatchImport bool   `json:"supports_batch_import,omitempty"`
+	// TokenStatus is the daemon's most recent token-guard verdict (DOS-1036)
+	// for this runtime's provider: "online", "offline", or omitted when
+	// probing is disabled or the verdict was inconclusive (ambiguous/setup
+	// error) — omitted means "leave the server-side status unchanged".
+	TokenStatus string `json:"token_status,omitempty"`
 }
 
 // DaemonHeartbeatAckPayload is the server's reply to DaemonHeartbeatRequestPayload.
