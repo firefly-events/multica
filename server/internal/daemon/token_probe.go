@@ -95,6 +95,15 @@ type tokenProbeCacheEntry struct {
 // (TokenProbeScript unset — no behavior change, DOS-1037 AC7) or when the
 // latest verdict is inconclusive; callers must treat "" as "leave the
 // runtime's current status alone", never as "offline".
+//
+// NOTE: this still probes synchronously on a cache miss/staleness, bounded
+// by tokenProbeExecTimeout. CodeRabbit's review flagged that sendWSHeartbeats
+// (wakeup.go) calls this once per runtime in a single serial loop on one
+// ticker, so a cold-cache probe for one runtime can delay heartbeat delivery
+// for every other runtime in that tick — tracked as a separate follow-up
+// (see DOS-1037 review thread) rather than folded into this timeout-race fix,
+// since it needs its own concurrency design (in-flight dedup, cache
+// pre-warming) and its own test coverage.
 func (d *Daemon) currentTokenStatus(ctx context.Context, provider string) string {
 	if d.cfg.TokenProbeScript == "" || provider == "" {
 		return ""
