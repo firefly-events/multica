@@ -97,13 +97,14 @@ type tokenProbeCacheEntry struct {
 // runtime's current status alone", never as "offline".
 //
 // NOTE: this still probes synchronously on a cache miss/staleness, bounded
-// by tokenProbeExecTimeout. CodeRabbit's review flagged that sendWSHeartbeats
-// (wakeup.go) calls this once per runtime in a single serial loop on one
-// ticker, so a cold-cache probe for one runtime can delay heartbeat delivery
-// for every other runtime in that tick — tracked as a separate follow-up
-// (see DOS-1037 review thread) rather than folded into this timeout-race fix,
-// since it needs its own concurrency design (in-flight dedup, cache
-// pre-warming) and its own test coverage.
+// by tokenProbeExecTimeout — currentTokenStatus itself blocks its caller for
+// up to that long. CodeRabbit's review flagged that this could serialize
+// heartbeat/registration delivery for every runtime behind one runtime's
+// cold probe; callers (sendWSHeartbeats in wakeup.go, and
+// registerRuntimesForWorkspace in daemon.go) now run one goroutine per
+// runtime/provider so a slow probe only delays its own runtime, not the
+// others (DOS-1256). A given provider's own probe is still serialized
+// against itself via tokenProbeMu.
 func (d *Daemon) currentTokenStatus(ctx context.Context, provider string) string {
 	if d.cfg.TokenProbeScript == "" || provider == "" {
 		return ""

@@ -744,37 +744,66 @@ func (d *Daemon) findRuntime(id string) *Runtime {
 
 func (d *Daemon) registerRuntimesForWorkspace(ctx context.Context, workspaceID string) (*RegisterResponse, error) {
 	d.logger.Debug("registering runtimes for workspace", "workspace_id", workspaceID, "agent_count", len(d.cfg.Agents))
-	var runtimes []map[string]string
+
+	type agentEntry struct {
+		name  string
+		entry AgentEntry
+	}
+	entries := make([]agentEntry, 0, len(d.cfg.Agents))
 	for name, entry := range d.cfg.Agents {
-		version, err := detectAgentVersion(ctx, entry.Path)
-		if err != nil {
-			d.logger.Warn("skip registering runtime", "name", name, "error", err)
-			continue
+		entries = append(entries, agentEntry{name: name, entry: entry})
+	}
+
+	// Each provider's token probe can block for up to tokenProbeExecTimeout
+	// on a cold cache. Detecting/probing providers sequentially here means
+	// registration latency scales with the number of configured providers;
+	// run them concurrently so one slow/cold probe doesn't delay the others
+	// (DOS-1037 review follow-up on the registration-path serialization
+	// concern — see currentTokenStatus doc and DOS-1256).
+	results := make([]map[string]string, len(entries))
+	var wg sync.WaitGroup
+	for i, ae := range entries {
+		wg.Add(1)
+		go func(i int, name string, entry AgentEntry) {
+			defer wg.Done()
+			version, err := detectAgentVersion(ctx, entry.Path)
+			if err != nil {
+				d.logger.Warn("skip registering runtime", "name", name, "error", err)
+				return
+			}
+			if err := checkAgentMinVersion(name, version); err != nil {
+				d.logger.Warn("skip registering runtime: version too old", "name", name, "version", version, "error", err)
+				return
+			}
+			d.setAgentVersion(name, version)
+			d.logger.Debug("agent version detected", "name", name, "version", version, "path", entry.Path)
+			displayName := strings.ToUpper(name[:1]) + name[1:]
+			if d.cfg.DeviceName != "" {
+				displayName = fmt.Sprintf("%s (%s)", displayName, d.cfg.DeviceName)
+			}
+			// Default optimistic ("online") when the probe is disabled or its
+			// verdict is inconclusive — see currentTokenStatus doc. Registration
+			// has no prior status to fall back to, so an inconclusive probe here
+			// starts the runtime online rather than leaving it in limbo.
+			status := d.currentTokenStatus(ctx, name)
+			if status == "" {
+				status = "online"
+			}
+			results[i] = map[string]string{
+				"name":    displayName,
+				"type":    name,
+				"version": version,
+				"status":  status,
+			}
+		}(i, ae.name, ae.entry)
+	}
+	wg.Wait()
+
+	var runtimes []map[string]string
+	for _, rt := range results {
+		if rt != nil {
+			runtimes = append(runtimes, rt)
 		}
-		if err := checkAgentMinVersion(name, version); err != nil {
-			d.logger.Warn("skip registering runtime: version too old", "name", name, "version", version, "error", err)
-			continue
-		}
-		d.setAgentVersion(name, version)
-		d.logger.Debug("agent version detected", "name", name, "version", version, "path", entry.Path)
-		displayName := strings.ToUpper(name[:1]) + name[1:]
-		if d.cfg.DeviceName != "" {
-			displayName = fmt.Sprintf("%s (%s)", displayName, d.cfg.DeviceName)
-		}
-		// Default optimistic ("online") when the probe is disabled or its
-		// verdict is inconclusive — see currentTokenStatus doc. Registration
-		// has no prior status to fall back to, so an inconclusive probe here
-		// starts the runtime online rather than leaving it in limbo.
-		status := d.currentTokenStatus(ctx, name)
-		if status == "" {
-			status = "online"
-		}
-		runtimes = append(runtimes, map[string]string{
-			"name":    displayName,
-			"type":    name,
-			"version": version,
-			"status":  status,
-		})
 	}
 	if len(runtimes) == 0 {
 		return nil, fmt.Errorf("no agent runtimes could be registered")
