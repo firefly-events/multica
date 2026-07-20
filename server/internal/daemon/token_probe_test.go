@@ -59,6 +59,72 @@ func TestRunTokenProbe_MissingScriptIsInconclusive(t *testing.T) {
 	}
 }
 
+// TestRunTokenProbe_PassesExplicitInnerTimeout guards the fix for the
+// outer/inner timeout race found in DOS-1037 review: the daemon must not
+// rely on token-guard's own default matching tokenProbeExecTimeout, it must
+// pass an explicit --timeout below its own backstop.
+func TestRunTokenProbe_PassesExplicitInnerTimeout(t *testing.T) {
+	dir := t.TempDir()
+	argsFile := filepath.Join(dir, "args")
+	path := filepath.Join(dir, "fake-token-guard")
+	script := fmt.Sprintf("#!/bin/sh\necho \"$@\" > %q\nexit 0\n", argsFile)
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake probe script: %v", err)
+	}
+
+	runTokenProbe(context.Background(), path, "claude")
+
+	got, err := os.ReadFile(argsFile)
+	if err != nil {
+		t.Fatalf("read captured args: %v", err)
+	}
+	want := fmt.Sprintf("claude --timeout %d\n", int(tokenProbeInnerTimeout.Seconds()))
+	if string(got) != want {
+		t.Fatalf("probe args = %q, want %q", string(got), want)
+	}
+	if tokenProbeInnerTimeout >= tokenProbeExecTimeout {
+		t.Fatalf("tokenProbeInnerTimeout (%s) must stay well below tokenProbeExecTimeout (%s), or the outer backstop can win the race again", tokenProbeInnerTimeout, tokenProbeExecTimeout)
+	}
+}
+
+// TestRunTokenProbe_OuterTimeoutKillsHungScriptWithoutFalseOfflineOrOnline
+// reproduces the race from DOS-1037 review directly: a script that ignores
+// --timeout and hangs past the outer exec deadline must be killed, and the
+// resulting signal-kill verdict must be inconclusive (leave status
+// unchanged), never silently "online" and never a fabricated "offline"
+// dressed up as exit 124.
+func TestRunTokenProbe_OuterTimeoutKillsHungScriptWithoutFalseOfflineOrOnline(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "hung-token-guard")
+	// Ignores the --timeout arg entirely, standing in for a broken/forked
+	// script whose inner alarm never fires. sleep well past the short outer
+	// timeout below so the test isn't racy against process-start overhead.
+	script := "#!/bin/sh\nsleep 5\nexit 0\n"
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatalf("write hung probe script: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	got := runTokenProbe(ctx, path, "claude")
+	elapsed := time.Since(start)
+
+	if elapsed > 2*time.Second {
+		t.Fatalf("runTokenProbe took %s, want it bounded by the outer context timeout", elapsed)
+	}
+	if got.status != "" {
+		t.Fatalf("status = %q for an outer-timeout-killed script, want \"\" (inconclusive, never offline or online)", got.status)
+	}
+	if got.ambiguous {
+		t.Fatalf("ambiguous = true for a signal-killed script, want false (this isn't the exit-5 Keychain case)")
+	}
+	if got.reason == "" {
+		t.Fatalf("reason is empty for an inconclusive verdict; want a non-empty reason so the caller can log it")
+	}
+}
+
 func newTestDaemonForProbe(scriptPath string, interval time.Duration) *Daemon {
 	return &Daemon{
 		cfg: Config{

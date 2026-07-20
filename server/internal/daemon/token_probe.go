@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"os/exec"
+	"strconv"
 	"time"
 )
 
@@ -15,11 +16,20 @@ const (
 	tokenProbeExitAmbiguous = 5
 )
 
-// tokenProbeExecTimeout bounds a single token-guard invocation. token-guard
-// already wraps itself in a hard wall-clock timeout (DOS-1036) well under
-// this value; this is only a backstop against the script hanging outside
-// that contract (e.g. a broken fork of the script).
-const tokenProbeExecTimeout = 30 * time.Second
+// token-guard defaults to its own 30s internal alarm (DOS-1036). Relying on
+// that default matching our own backstop is a race: the outer exec.CommandContext
+// timer starts at process spawn, while token-guard's inner `perl -e "alarm N"`
+// only starts counting once the interpreter has booted — so two *equal*
+// durations mean the outer timer reliably fires first, SIGKILLs the process,
+// and turns a legitimate "timed out" (exit 124) verdict into an untraceable
+// signal-kill that the switch below can't distinguish from a broken script
+// (reproduced during DOS-1037 review). We close the race by owning both ends
+// explicitly: pass token-guard a hard inner timeout well below our own outer
+// backstop, instead of trusting the two scripts' defaults to stay apart.
+const (
+	tokenProbeInnerTimeout = 20 * time.Second
+	tokenProbeExecTimeout  = 45 * time.Second
+)
 
 // tokenProbeVerdict is the outcome of one token-guard run, mapped to a
 // dispatch-eligibility direction. Status is "" for anything that isn't a
@@ -32,6 +42,9 @@ const tokenProbeExecTimeout = 30 * time.Second
 type tokenProbeVerdict struct {
 	status    string // "online", "offline", or "" (no verdict, leave unchanged)
 	ambiguous bool
+	// reason explains a "" (inconclusive) verdict for logging — empty for a
+	// confirmed online/offline/ambiguous verdict, which already log elsewhere.
+	reason string
 }
 
 // runTokenProbe shells out to scriptPath (bin/token-guard) for the given
@@ -40,7 +53,7 @@ type tokenProbeVerdict struct {
 // its own internal timeout (exit 124) but a broken script could still hang
 // indefinitely without one here.
 func runTokenProbe(ctx context.Context, scriptPath, provider string) tokenProbeVerdict {
-	cmd := exec.CommandContext(ctx, scriptPath, provider)
+	cmd := exec.CommandContext(ctx, scriptPath, provider, "--timeout", strconv.Itoa(int(tokenProbeInnerTimeout.Seconds())))
 	err := cmd.Run()
 	if err == nil {
 		return tokenProbeVerdict{status: "online"}
@@ -49,7 +62,7 @@ func runTokenProbe(ctx context.Context, scriptPath, provider string) tokenProbeV
 	if !ok {
 		// The probe never ran (missing binary, permissions, ctx already
 		// cancelled) — inconclusive, not a confirmed failure.
-		return tokenProbeVerdict{}
+		return tokenProbeVerdict{reason: "probe did not run: " + err.Error()}
 	}
 	switch exitErr.ExitCode() {
 	case tokenProbeExitInvalid, tokenProbeExitTimeout:
@@ -57,9 +70,15 @@ func runTokenProbe(ctx context.Context, scriptPath, provider string) tokenProbeV
 	case tokenProbeExitAmbiguous:
 		return tokenProbeVerdict{ambiguous: true}
 	case tokenProbeExitUsageErr:
-		return tokenProbeVerdict{}
+		return tokenProbeVerdict{reason: "usage/setup error (exit 3)"}
+	case -1:
+		// Killed by our own outer timeout (tokenProbeExecTimeout) rather than
+		// token-guard's inner alarm — the inner --timeout keeps this well
+		// clear of the exit-124 case in normal operation, but a broken or
+		// unresponsive script can still land here. Inconclusive, not offline.
+		return tokenProbeVerdict{reason: "probe killed by outer exec timeout without an exit code"}
 	default:
-		return tokenProbeVerdict{}
+		return tokenProbeVerdict{reason: "undocumented exit code " + strconv.Itoa(exitErr.ExitCode())}
 	}
 }
 
@@ -94,16 +113,19 @@ func (d *Daemon) currentTokenStatus(ctx context.Context, provider string) string
 		return entry.verdict.status
 	}
 
-	// The exec's own hard timeout is independent of the cache TTL — token-guard
-	// already enforces its own internal alarm (exit 124) well under this, so
-	// tokenProbeExecTimeout only needs to guard against the script itself
-	// hanging outside that contract.
+	// The exec's own hard timeout is independent of the cache TTL. We pass
+	// token-guard an explicit --timeout (tokenProbeInnerTimeout) well below
+	// tokenProbeExecTimeout, so the outer backstop only fires for a script
+	// that's hanging outside its own documented contract, not in the normal
+	// exit-124 case.
 	probeCtx, cancel := context.WithTimeout(ctx, tokenProbeExecTimeout)
 	defer cancel()
 	verdict := runTokenProbe(probeCtx, d.cfg.TokenProbeScript, provider)
 
 	if verdict.ambiguous {
 		d.logger.Warn("token probe ambiguous: Keychain-backed credential, verdict untrustworthy — leaving runtime status unchanged", "provider", provider)
+	} else if verdict.status == "" && verdict.reason != "" {
+		d.logger.Warn("token probe inconclusive: leaving runtime status unchanged", "provider", provider, "reason", verdict.reason)
 	}
 
 	d.tokenProbeMu.Lock()
