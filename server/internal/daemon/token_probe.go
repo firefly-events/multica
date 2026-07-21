@@ -103,8 +103,14 @@ type tokenProbeCacheEntry struct {
 // cold probe; callers (sendWSHeartbeats in wakeup.go, and
 // registerRuntimesForWorkspace in daemon.go) now run one goroutine per
 // runtime/provider so a slow probe only delays its own runtime, not the
-// others (DOS-1256). A given provider's own probe is still serialized
-// against itself via tokenProbeMu.
+// others (DOS-1256, DOS-1255). tokenProbeMu only guards the cache read/write,
+// not the exec itself — a single daemon serving multiple workspaces that
+// share a provider (e.g. two workspaces both configured with "claude") can
+// still fan out redundant concurrent probes for that provider on a cache
+// miss. Each write stays mutex-protected (no data race), so the only cost is
+// duplicate process spawns and "last write wins" on the cache entry; per-
+// provider in-flight dedup would remove that but isn't needed for the
+// blocking behavior this fix targets.
 func (d *Daemon) currentTokenStatus(ctx context.Context, provider string) string {
 	if d.cfg.TokenProbeScript == "" || provider == "" {
 		return ""
