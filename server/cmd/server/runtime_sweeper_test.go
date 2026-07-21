@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/multica-ai/multica/server/internal/events"
+	"github.com/multica-ai/multica/server/internal/service"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 )
 
@@ -687,6 +688,294 @@ func TestExpireStaleQueuedTasksRespectsBatchLimit(t *testing.T) {
 	if remaining != 3 {
 		t.Fatalf("expected 3 queued tasks remaining after batched sweep, got %d", remaining)
 	}
+}
+
+func TestTodoDispatchReclaimRequeuesFailedAgentTodo(t *testing.T) {
+	if testPool == nil {
+		t.Skip("no database connection")
+	}
+
+	ctx := context.Background()
+	agentID, runtimeID := findIntegrationAgentRuntime(t)
+	issueID := createReclaimIssue(t, "Todo reclaim failed agent", "agent", agentID)
+	t.Cleanup(func() { cleanupReclaimIssue(t, issueID) })
+	insertFailedTask(t, agentID, runtimeID, issueID)
+
+	queries := db.New(testPool)
+	stats := sweepTodoDispatchReclaim(ctx, queries, service.NewTaskService(queries, nil, nil, events.New()))
+	if stats.Reclaimed < 1 || stats.Failed != 0 {
+		t.Fatalf("unexpected stats: %+v", stats)
+	}
+
+	status, forceFresh, isLeader := latestTaskForIssueAgent(t, issueID, agentID)
+	if status != "queued" {
+		t.Fatalf("expected latest task to be queued, got %q", status)
+	}
+	if !forceFresh {
+		t.Fatal("expected reclaimed task to force a fresh session")
+	}
+	if isLeader {
+		t.Fatal("agent-assigned reclaim should not create a leader task")
+	}
+}
+
+func TestTodoDispatchReclaimRoutesSquadTodoToLeader(t *testing.T) {
+	if testPool == nil {
+		t.Skip("no database connection")
+	}
+
+	ctx := context.Background()
+	leaderID, _ := findIntegrationAgentRuntime(t)
+	squadID := createReclaimSquad(t, "Todo reclaim squad", leaderID)
+	issueID := createReclaimIssue(t, "Todo reclaim missing squad task", "squad", squadID)
+	t.Cleanup(func() {
+		cleanupReclaimIssue(t, issueID)
+		testPool.Exec(ctx, `DELETE FROM squad_member WHERE squad_id = $1`, squadID)
+		testPool.Exec(ctx, `DELETE FROM squad WHERE id = $1`, squadID)
+	})
+
+	queries := db.New(testPool)
+	stats := sweepTodoDispatchReclaim(ctx, queries, service.NewTaskService(queries, nil, nil, events.New()))
+	if stats.Routed != 1 || stats.Reclaimed != 0 || stats.Failed != 0 {
+		t.Fatalf("unexpected stats: %+v", stats)
+	}
+
+	status, forceFresh, isLeader := latestTaskForIssueAgent(t, issueID, leaderID)
+	if status != "queued" {
+		t.Fatalf("expected squad leader task to be queued, got %q", status)
+	}
+	if !forceFresh {
+		t.Fatal("expected squad reclaim to force a fresh session")
+	}
+	if !isLeader {
+		t.Fatal("expected squad reclaim to mark the task as a leader task")
+	}
+}
+
+func TestTodoDispatchReclaimSkipsOfflineRuntime(t *testing.T) {
+	if testPool == nil {
+		t.Skip("no database connection")
+	}
+
+	ctx := context.Background()
+	agentID, runtimeID := findIntegrationAgentRuntime(t)
+	_, originalRuntimeStatus := getReclaimAgentRuntimeState(t, agentID, runtimeID)
+	issueID := createReclaimIssue(t, "Todo reclaim offline runtime", "agent", agentID)
+	t.Cleanup(func() {
+		cleanupReclaimIssue(t, issueID)
+		testPool.Exec(ctx, `UPDATE agent_runtime SET status = $2 WHERE id = $1`, runtimeID, originalRuntimeStatus)
+	})
+	insertFailedTask(t, agentID, runtimeID, issueID)
+	if _, err := testPool.Exec(ctx, `UPDATE agent_runtime SET status = 'offline' WHERE id = $1`, runtimeID); err != nil {
+		t.Fatalf("failed to mark runtime offline: %v", err)
+	}
+
+	queries := db.New(testPool)
+	stats := sweepTodoDispatchReclaim(ctx, queries, service.NewTaskService(queries, nil, nil, events.New()))
+	if stats.Reclaimed != 0 || stats.Routed != 0 || stats.Failed != 0 {
+		t.Fatalf("unexpected stats: %+v", stats)
+	}
+	if queued := countQueuedTasksForIssue(t, issueID); queued != 0 {
+		t.Fatalf("expected no queued tasks for offline runtime, got %d", queued)
+	}
+}
+
+func TestTodoDispatchReclaimSkipsWIPCap(t *testing.T) {
+	if testPool == nil {
+		t.Skip("no database connection")
+	}
+
+	ctx := context.Background()
+	agentID, runtimeID := findIntegrationAgentRuntime(t)
+	originalCap, originalRuntimeStatus := getReclaimAgentRuntimeState(t, agentID, runtimeID)
+	issueID := createReclaimIssue(t, "Todo reclaim wip cap", "agent", agentID)
+	blockerIssueID := createReclaimIssue(t, "Todo reclaim wip cap blocker", "agent", agentID)
+	t.Cleanup(func() {
+		cleanupReclaimIssue(t, issueID)
+		cleanupReclaimIssue(t, blockerIssueID)
+		testPool.Exec(ctx, `UPDATE agent SET max_concurrent_tasks = $2 WHERE id = $1`, agentID, originalCap)
+		testPool.Exec(ctx, `UPDATE agent_runtime SET status = $2 WHERE id = $1`, runtimeID, originalRuntimeStatus)
+	})
+	if _, err := testPool.Exec(ctx, `UPDATE agent SET max_concurrent_tasks = 1 WHERE id = $1`, agentID); err != nil {
+		t.Fatalf("failed to set deterministic WIP cap: %v", err)
+	}
+	insertFailedTask(t, agentID, runtimeID, issueID)
+	insertRunningTask(t, agentID, runtimeID, blockerIssueID)
+
+	queries := db.New(testPool)
+	stats := sweepTodoDispatchReclaim(ctx, queries, service.NewTaskService(queries, nil, nil, events.New()))
+	if stats.Reclaimed != 0 || stats.Routed != 0 || stats.Failed != 0 {
+		t.Fatalf("unexpected stats: %+v", stats)
+	}
+	if queued := countQueuedTasksForIssue(t, issueID); queued != 0 {
+		t.Fatalf("expected no queued tasks when agent is at WIP cap, got %d", queued)
+	}
+}
+
+func TestTodoDispatchReclaimTripsBreaker(t *testing.T) {
+	if testPool == nil {
+		t.Skip("no database connection")
+	}
+
+	ctx := context.Background()
+	agentID, runtimeID := findIntegrationAgentRuntime(t)
+	issueID := createReclaimIssue(t, "Todo reclaim breaker", "agent", agentID)
+	t.Cleanup(func() { cleanupReclaimIssue(t, issueID) })
+	for i := 0; i < todoDispatchReclaimMaxAttempts; i++ {
+		insertFailedTask(t, agentID, runtimeID, issueID)
+	}
+
+	queries := db.New(testPool)
+	stats := sweepTodoDispatchReclaim(ctx, queries, service.NewTaskService(queries, nil, nil, events.New()))
+	if stats.Reclaimed != 0 || stats.Routed != 0 || stats.Failed != 0 {
+		t.Fatalf("unexpected stats: %+v", stats)
+	}
+	if stats.Skipped["breaker_tripped"] != 1 {
+		t.Fatalf("expected breaker_tripped skip, got %+v", stats.Skipped)
+	}
+	if queued := countQueuedTasksForIssue(t, issueID); queued != 0 {
+		t.Fatalf("expected no queued tasks once the breaker trips, got %d", queued)
+	}
+	if status := reclaimIssueStatus(t, issueID); status != "blocked" {
+		t.Fatalf("expected issue to be blocked once the breaker trips, got %q", status)
+	}
+}
+
+func reclaimIssueStatus(t *testing.T, issueID string) string {
+	t.Helper()
+	var status string
+	if err := testPool.QueryRow(context.Background(), `
+		SELECT status FROM issue WHERE id = $1
+	`, issueID).Scan(&status); err != nil {
+		t.Fatalf("failed to read issue status: %v", err)
+	}
+	return status
+}
+
+func findIntegrationAgentRuntime(t *testing.T) (string, string) {
+	t.Helper()
+	var agentID, runtimeID string
+	if err := testPool.QueryRow(context.Background(), `
+		SELECT a.id, a.runtime_id FROM agent a
+		JOIN agent_runtime ar ON ar.id = a.runtime_id
+		JOIN member m ON m.workspace_id = a.workspace_id
+		JOIN "user" u ON u.id = m.user_id
+		WHERE u.email = $1
+		  AND a.archived_at IS NULL
+		  AND a.runtime_id IS NOT NULL
+		  AND ar.status = 'online'
+		  AND NOT EXISTS (
+		      SELECT 1 FROM agent_task_queue active
+		      WHERE active.agent_id = a.id
+		        AND active.status IN ('queued', 'dispatched', 'running', 'waiting_local_directory')
+		  )
+		LIMIT 1
+	`, integrationTestEmail).Scan(&agentID, &runtimeID); err != nil {
+		t.Fatalf("failed to find test agent: %v", err)
+	}
+	return agentID, runtimeID
+}
+
+func getReclaimAgentRuntimeState(t *testing.T, agentID, runtimeID string) (maxConcurrentTasks int32, runtimeStatus string) {
+	t.Helper()
+	if err := testPool.QueryRow(context.Background(), `
+		SELECT a.max_concurrent_tasks, ar.status
+		FROM agent a
+		JOIN agent_runtime ar ON ar.id = a.runtime_id
+		WHERE a.id = $1 AND ar.id = $2
+	`, agentID, runtimeID).Scan(&maxConcurrentTasks, &runtimeStatus); err != nil {
+		t.Fatalf("failed to read reclaim agent/runtime state: %v", err)
+	}
+	return maxConcurrentTasks, runtimeStatus
+}
+
+func createReclaimIssue(t *testing.T, title, assigneeType, assigneeID string) string {
+	t.Helper()
+	var issueID string
+	if err := testPool.QueryRow(context.Background(), `
+		WITH bumped AS (
+			UPDATE workspace SET issue_counter = issue_counter + 1
+			WHERE id = $1 RETURNING issue_counter
+		)
+		INSERT INTO issue (workspace_id, title, status, priority, creator_type, creator_id, assignee_type, assignee_id, number)
+		VALUES ($1, $2, 'todo', 'none', 'member', $3, $4, $5, (SELECT issue_counter FROM bumped))
+		RETURNING id
+	`, testWorkspaceID, title, testUserID, assigneeType, assigneeID).Scan(&issueID); err != nil {
+		t.Fatalf("failed to create reclaim issue: %v", err)
+	}
+	return issueID
+}
+
+func createReclaimSquad(t *testing.T, name, leaderID string) string {
+	t.Helper()
+	var squadID string
+	if err := testPool.QueryRow(context.Background(), `
+		INSERT INTO squad (workspace_id, name, description, leader_id, creator_id)
+		VALUES ($1, $2, '', $3, $4)
+		RETURNING id
+	`, testWorkspaceID, name, leaderID, testUserID).Scan(&squadID); err != nil {
+		t.Fatalf("failed to create reclaim squad: %v", err)
+	}
+	if _, err := testPool.Exec(context.Background(), `
+		INSERT INTO squad_member (squad_id, member_type, member_id, role)
+		VALUES ($1, 'agent', $2, 'leader')
+	`, squadID, leaderID); err != nil {
+		t.Fatalf("failed to create reclaim squad leader member: %v", err)
+	}
+	return squadID
+}
+
+func cleanupReclaimIssue(t *testing.T, issueID string) {
+	t.Helper()
+	ctx := context.Background()
+	testPool.Exec(ctx, `DELETE FROM agent_task_queue WHERE issue_id = $1`, issueID)
+	testPool.Exec(ctx, `DELETE FROM issue WHERE id = $1`, issueID)
+}
+
+func insertFailedTask(t *testing.T, agentID, runtimeID, issueID string) {
+	t.Helper()
+	if _, err := testPool.Exec(context.Background(), `
+		INSERT INTO agent_task_queue (agent_id, runtime_id, issue_id, status, priority, completed_at, error, failure_reason)
+		VALUES ($1, $2, $3, 'failed', 0, now() - interval '16 minutes', 'agent failed', 'agent_error')
+	`, agentID, runtimeID, issueID); err != nil {
+		t.Fatalf("failed to insert failed task: %v", err)
+	}
+}
+
+func insertRunningTask(t *testing.T, agentID, runtimeID, issueID string) {
+	t.Helper()
+	if _, err := testPool.Exec(context.Background(), `
+		INSERT INTO agent_task_queue (agent_id, runtime_id, issue_id, status, priority, dispatched_at, started_at)
+		VALUES ($1, $2, $3, 'running', 0, now(), now())
+	`, agentID, runtimeID, issueID); err != nil {
+		t.Fatalf("failed to insert running task: %v", err)
+	}
+}
+
+func latestTaskForIssueAgent(t *testing.T, issueID, agentID string) (status string, forceFresh bool, isLeader bool) {
+	t.Helper()
+	if err := testPool.QueryRow(context.Background(), `
+		SELECT status, force_fresh_session, is_leader_task
+		FROM agent_task_queue
+		WHERE issue_id = $1 AND agent_id = $2
+		ORDER BY created_at DESC
+		LIMIT 1
+	`, issueID, agentID).Scan(&status, &forceFresh, &isLeader); err != nil {
+		t.Fatalf("failed to read latest task: %v", err)
+	}
+	return status, forceFresh, isLeader
+}
+
+func countQueuedTasksForIssue(t *testing.T, issueID string) int {
+	t.Helper()
+	var count int
+	if err := testPool.QueryRow(context.Background(), `
+		SELECT COUNT(*) FROM agent_task_queue
+		WHERE issue_id = $1 AND status = 'queued'
+	`, issueID).Scan(&count); err != nil {
+		t.Fatalf("failed to count queued tasks: %v", err)
+	}
+	return count
 }
 
 // parseUUIDBytes converts a UUID string to the 16-byte array used by pgtype.UUID.

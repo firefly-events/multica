@@ -2186,6 +2186,181 @@ func (q *Queries) ListTasksByIssue(ctx context.Context, issueID pgtype.UUID) ([]
 	return items, nil
 }
 
+const listTodoDispatchReclaimCandidates = `-- name: ListTodoDispatchReclaimCandidates :many
+WITH candidates AS (
+    SELECT
+        i.id, i.workspace_id, i.title, i.description, i.status, i.priority, i.assignee_type, i.assignee_id, i.creator_type, i.creator_id, i.parent_issue_id, i.acceptance_criteria, i.context_refs, i.position, i.due_date, i.created_at, i.updated_at, i.number, i.project_id, i.origin_type, i.origin_id, i.first_executed_at, i.start_date, i.metadata,
+        COALESCE(s.leader_id, i.assignee_id) AS target_agent_id,
+        (i.assignee_type = 'squad')::boolean AS is_squad_route,
+        latest.id AS latest_task_id,
+        COALESCE(latest.status, '') AS latest_task_status,
+        latest.failure_reason AS latest_failure_reason,
+        COALESCE(attempts.failed_tasks_count, 0) AS failed_tasks_count
+    FROM issue i
+    LEFT JOIN squad s
+           ON i.assignee_type = 'squad'
+          AND s.id = i.assignee_id
+          AND s.workspace_id = i.workspace_id
+          AND s.archived_at IS NULL
+    LEFT JOIN LATERAL (
+        SELECT atq.id, atq.status, atq.failure_reason, atq.completed_at
+        FROM agent_task_queue atq
+        WHERE atq.issue_id = i.id
+          AND atq.agent_id = COALESCE(s.leader_id, i.assignee_id)
+        ORDER BY COALESCE(atq.completed_at, atq.started_at, atq.dispatched_at, atq.created_at) DESC
+        LIMIT 1
+    ) latest ON TRUE
+    LEFT JOIN LATERAL (
+        SELECT count(*)::int AS failed_tasks_count
+        FROM agent_task_queue atq
+        WHERE atq.issue_id = i.id
+          AND atq.agent_id = COALESCE(s.leader_id, i.assignee_id)
+          AND atq.status = 'failed'
+    ) attempts ON TRUE
+    WHERE i.status = 'todo'
+      AND i.assignee_type IN ('agent', 'squad')
+      AND i.assignee_id IS NOT NULL
+      AND COALESCE(s.leader_id, i.assignee_id) IS NOT NULL
+      AND NOT EXISTS (
+          SELECT 1 FROM agent_task_queue active
+          WHERE active.issue_id = i.id
+            AND active.status IN ('queued', 'dispatched', 'running', 'waiting_local_directory')
+      )
+      AND (
+          latest.id IS NULL 
+          OR (
+              latest.status = 'failed' 
+              AND latest.completed_at < now() - make_interval(secs => $2::double precision)
+          )
+      )
+)
+SELECT
+    candidates.id, candidates.workspace_id, candidates.title, candidates.description, candidates.status, candidates.priority, candidates.assignee_type, candidates.assignee_id, candidates.creator_type, candidates.creator_id, candidates.parent_issue_id, candidates.acceptance_criteria, candidates.context_refs, candidates.position, candidates.due_date, candidates.created_at, candidates.updated_at, candidates.number, candidates.project_id, candidates.origin_type, candidates.origin_id, candidates.first_executed_at, candidates.start_date, candidates.metadata, candidates.target_agent_id, candidates.is_squad_route, candidates.latest_task_id, candidates.latest_task_status, candidates.latest_failure_reason, candidates.failed_tasks_count,
+    a.archived_at AS target_agent_archived_at,
+    a.runtime_id AS target_runtime_id,
+    a.max_concurrent_tasks AS target_max_concurrent_tasks,
+    ar.status AS target_runtime_status,
+    running.target_running_tasks
+FROM candidates
+JOIN agent a ON a.id = candidates.target_agent_id
+JOIN agent_runtime ar ON ar.id = a.runtime_id
+CROSS JOIN LATERAL (
+        SELECT count(*)::int AS target_running_tasks
+        FROM agent_task_queue running
+        WHERE running.agent_id = candidates.target_agent_id
+          AND running.status IN ('dispatched', 'running', 'waiting_local_directory')
+) running
+WHERE a.archived_at IS NULL
+  AND ar.status = 'online'
+  AND running.target_running_tasks < a.max_concurrent_tasks
+ORDER BY candidates.updated_at ASC
+LIMIT $1::int
+`
+
+type ListTodoDispatchReclaimCandidatesParams struct {
+	MaxPerTick   int32   `json:"max_per_tick"`
+	CooldownSecs float64 `json:"cooldown_secs"`
+}
+
+type ListTodoDispatchReclaimCandidatesRow struct {
+	ID                       pgtype.UUID        `json:"id"`
+	WorkspaceID              pgtype.UUID        `json:"workspace_id"`
+	Title                    string             `json:"title"`
+	Description              pgtype.Text        `json:"description"`
+	Status                   string             `json:"status"`
+	Priority                 string             `json:"priority"`
+	AssigneeType             pgtype.Text        `json:"assignee_type"`
+	AssigneeID               pgtype.UUID        `json:"assignee_id"`
+	CreatorType              string             `json:"creator_type"`
+	CreatorID                pgtype.UUID        `json:"creator_id"`
+	ParentIssueID            pgtype.UUID        `json:"parent_issue_id"`
+	AcceptanceCriteria       []byte             `json:"acceptance_criteria"`
+	ContextRefs              []byte             `json:"context_refs"`
+	Position                 float64            `json:"position"`
+	DueDate                  pgtype.Date        `json:"due_date"`
+	CreatedAt                pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt                pgtype.Timestamptz `json:"updated_at"`
+	Number                   int32              `json:"number"`
+	ProjectID                pgtype.UUID        `json:"project_id"`
+	OriginType               pgtype.Text        `json:"origin_type"`
+	OriginID                 pgtype.UUID        `json:"origin_id"`
+	FirstExecutedAt          pgtype.Timestamptz `json:"first_executed_at"`
+	StartDate                pgtype.Date        `json:"start_date"`
+	Metadata                 []byte             `json:"metadata"`
+	TargetAgentID            pgtype.UUID        `json:"target_agent_id"`
+	IsSquadRoute             bool               `json:"is_squad_route"`
+	LatestTaskID             pgtype.UUID        `json:"latest_task_id"`
+	LatestTaskStatus         string             `json:"latest_task_status"`
+	LatestFailureReason      pgtype.Text        `json:"latest_failure_reason"`
+	FailedTasksCount         int32              `json:"failed_tasks_count"`
+	TargetAgentArchivedAt    pgtype.Timestamptz `json:"target_agent_archived_at"`
+	TargetRuntimeID          pgtype.UUID        `json:"target_runtime_id"`
+	TargetMaxConcurrentTasks int32              `json:"target_max_concurrent_tasks"`
+	TargetRuntimeStatus      string             `json:"target_runtime_status"`
+	TargetRunningTasks       int32              `json:"target_running_tasks"`
+}
+
+// Finds todo issues whose dispatch path has gone silent: there is no active
+// task for the issue, and the target agent either never had a task for it or
+// the target agent's latest task failed. Agent-assigned issues target their
+// assignee directly; squad-assigned issues target the squad leader because
+// squad work is leader-routed everywhere else in the product.
+func (q *Queries) ListTodoDispatchReclaimCandidates(ctx context.Context, arg ListTodoDispatchReclaimCandidatesParams) ([]ListTodoDispatchReclaimCandidatesRow, error) {
+	rows, err := q.db.Query(ctx, listTodoDispatchReclaimCandidates, arg.MaxPerTick, arg.CooldownSecs)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListTodoDispatchReclaimCandidatesRow{}
+	for rows.Next() {
+		var i ListTodoDispatchReclaimCandidatesRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.WorkspaceID,
+			&i.Title,
+			&i.Description,
+			&i.Status,
+			&i.Priority,
+			&i.AssigneeType,
+			&i.AssigneeID,
+			&i.CreatorType,
+			&i.CreatorID,
+			&i.ParentIssueID,
+			&i.AcceptanceCriteria,
+			&i.ContextRefs,
+			&i.Position,
+			&i.DueDate,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.Number,
+			&i.ProjectID,
+			&i.OriginType,
+			&i.OriginID,
+			&i.FirstExecutedAt,
+			&i.StartDate,
+			&i.Metadata,
+			&i.TargetAgentID,
+			&i.IsSquadRoute,
+			&i.LatestTaskID,
+			&i.LatestTaskStatus,
+			&i.LatestFailureReason,
+			&i.FailedTasksCount,
+			&i.TargetAgentArchivedAt,
+			&i.TargetRuntimeID,
+			&i.TargetMaxConcurrentTasks,
+			&i.TargetRuntimeStatus,
+			&i.TargetRunningTasks,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listWorkspaceAgentTaskSnapshot = `-- name: ListWorkspaceAgentTaskSnapshot :many
 SELECT atq.id, atq.agent_id, atq.issue_id, atq.status, atq.priority, atq.dispatched_at, atq.started_at, atq.completed_at, atq.result, atq.error, atq.created_at, atq.context, atq.runtime_id, atq.session_id, atq.work_dir, atq.trigger_comment_id, atq.chat_session_id, atq.autopilot_run_id, atq.attempt, atq.max_attempts, atq.parent_task_id, atq.failure_reason, atq.trigger_summary, atq.force_fresh_session, atq.is_leader_task, atq.wait_reason, atq.initiator_user_id FROM agent_task_queue atq
 JOIN agent a ON a.id = atq.agent_id
@@ -2268,6 +2443,171 @@ func (q *Queries) ListWorkspaceAgentTaskSnapshot(ctx context.Context, workspaceI
 		return nil, err
 	}
 	return items, nil
+}
+
+const lockTodoDispatchReclaimCandidate = `-- name: LockTodoDispatchReclaimCandidate :one
+WITH locked_issue AS (
+    SELECT id, workspace_id, title, description, status, priority, assignee_type, assignee_id, creator_type, creator_id, parent_issue_id, acceptance_criteria, context_refs, position, due_date, created_at, updated_at, number, project_id, origin_type, origin_id, first_executed_at, start_date, metadata
+    FROM issue
+    WHERE issue.id = $1
+    FOR UPDATE
+),
+candidate AS (
+    SELECT
+        i.id, i.workspace_id, i.title, i.description, i.status, i.priority, i.assignee_type, i.assignee_id, i.creator_type, i.creator_id, i.parent_issue_id, i.acceptance_criteria, i.context_refs, i.position, i.due_date, i.created_at, i.updated_at, i.number, i.project_id, i.origin_type, i.origin_id, i.first_executed_at, i.start_date, i.metadata,
+        COALESCE(s.leader_id, i.assignee_id) AS target_agent_id,
+        (i.assignee_type = 'squad')::boolean AS is_squad_route,
+        latest.id AS latest_task_id,
+        COALESCE(latest.status, '') AS latest_task_status,
+        latest.failure_reason AS latest_failure_reason,
+        COALESCE(attempts.failed_tasks_count, 0) AS failed_tasks_count
+    FROM locked_issue i
+    LEFT JOIN squad s
+           ON i.assignee_type = 'squad'
+          AND s.id = i.assignee_id
+          AND s.workspace_id = i.workspace_id
+          AND s.archived_at IS NULL
+    LEFT JOIN LATERAL (
+        SELECT atq.id, atq.status, atq.failure_reason, atq.completed_at
+        FROM agent_task_queue atq
+        WHERE atq.issue_id = i.id
+          AND atq.agent_id = COALESCE(s.leader_id, i.assignee_id)
+        ORDER BY COALESCE(atq.completed_at, atq.started_at, atq.dispatched_at, atq.created_at) DESC
+        LIMIT 1
+    ) latest ON TRUE
+    LEFT JOIN LATERAL (
+        SELECT count(*)::int AS failed_tasks_count
+        FROM agent_task_queue atq
+        WHERE atq.issue_id = i.id
+          AND atq.agent_id = COALESCE(s.leader_id, i.assignee_id)
+          AND atq.status = 'failed'
+    ) attempts ON TRUE
+    WHERE i.status = 'todo'
+      AND i.assignee_type IN ('agent', 'squad')
+      AND i.assignee_id IS NOT NULL
+      AND COALESCE(s.leader_id, i.assignee_id) IS NOT NULL
+      AND NOT EXISTS (
+          SELECT 1 FROM agent_task_queue active
+          WHERE active.issue_id = i.id
+            AND active.status IN ('queued', 'dispatched', 'running', 'waiting_local_directory')
+      )
+      AND (
+          latest.id IS NULL 
+          OR (
+              latest.status = 'failed' 
+              AND latest.completed_at < now() - make_interval(secs => $2::double precision)
+          )
+      )
+)
+SELECT
+    candidate.id, candidate.workspace_id, candidate.title, candidate.description, candidate.status, candidate.priority, candidate.assignee_type, candidate.assignee_id, candidate.creator_type, candidate.creator_id, candidate.parent_issue_id, candidate.acceptance_criteria, candidate.context_refs, candidate.position, candidate.due_date, candidate.created_at, candidate.updated_at, candidate.number, candidate.project_id, candidate.origin_type, candidate.origin_id, candidate.first_executed_at, candidate.start_date, candidate.metadata, candidate.target_agent_id, candidate.is_squad_route, candidate.latest_task_id, candidate.latest_task_status, candidate.latest_failure_reason, candidate.failed_tasks_count,
+    a.archived_at AS target_agent_archived_at,
+    a.runtime_id AS target_runtime_id,
+    a.max_concurrent_tasks AS target_max_concurrent_tasks,
+    ar.status AS target_runtime_status,
+    running.target_running_tasks
+FROM candidate
+JOIN agent a ON a.id = candidate.target_agent_id
+JOIN agent_runtime ar ON ar.id = a.runtime_id
+CROSS JOIN LATERAL (
+        SELECT count(*)::int AS target_running_tasks
+        FROM agent_task_queue running
+        WHERE running.agent_id = candidate.target_agent_id
+          AND running.status IN ('dispatched', 'running', 'waiting_local_directory')
+) running
+WHERE a.archived_at IS NULL
+  AND ar.status = 'online'
+  AND running.target_running_tasks < a.max_concurrent_tasks
+`
+
+type LockTodoDispatchReclaimCandidateParams struct {
+	ID           pgtype.UUID `json:"id"`
+	CooldownSecs float64     `json:"cooldown_secs"`
+}
+
+type LockTodoDispatchReclaimCandidateRow struct {
+	ID                       pgtype.UUID        `json:"id"`
+	WorkspaceID              pgtype.UUID        `json:"workspace_id"`
+	Title                    string             `json:"title"`
+	Description              pgtype.Text        `json:"description"`
+	Status                   string             `json:"status"`
+	Priority                 string             `json:"priority"`
+	AssigneeType             pgtype.Text        `json:"assignee_type"`
+	AssigneeID               pgtype.UUID        `json:"assignee_id"`
+	CreatorType              string             `json:"creator_type"`
+	CreatorID                pgtype.UUID        `json:"creator_id"`
+	ParentIssueID            pgtype.UUID        `json:"parent_issue_id"`
+	AcceptanceCriteria       []byte             `json:"acceptance_criteria"`
+	ContextRefs              []byte             `json:"context_refs"`
+	Position                 float64            `json:"position"`
+	DueDate                  pgtype.Date        `json:"due_date"`
+	CreatedAt                pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt                pgtype.Timestamptz `json:"updated_at"`
+	Number                   int32              `json:"number"`
+	ProjectID                pgtype.UUID        `json:"project_id"`
+	OriginType               pgtype.Text        `json:"origin_type"`
+	OriginID                 pgtype.UUID        `json:"origin_id"`
+	FirstExecutedAt          pgtype.Timestamptz `json:"first_executed_at"`
+	StartDate                pgtype.Date        `json:"start_date"`
+	Metadata                 []byte             `json:"metadata"`
+	TargetAgentID            pgtype.UUID        `json:"target_agent_id"`
+	IsSquadRoute             bool               `json:"is_squad_route"`
+	LatestTaskID             pgtype.UUID        `json:"latest_task_id"`
+	LatestTaskStatus         string             `json:"latest_task_status"`
+	LatestFailureReason      pgtype.Text        `json:"latest_failure_reason"`
+	FailedTasksCount         int32              `json:"failed_tasks_count"`
+	TargetAgentArchivedAt    pgtype.Timestamptz `json:"target_agent_archived_at"`
+	TargetRuntimeID          pgtype.UUID        `json:"target_runtime_id"`
+	TargetMaxConcurrentTasks int32              `json:"target_max_concurrent_tasks"`
+	TargetRuntimeStatus      string             `json:"target_runtime_status"`
+	TargetRunningTasks       int32              `json:"target_running_tasks"`
+}
+
+// Revalidates one reclaim candidate under an issue row lock. The list query is
+// only a batch picker; this query is the atomic gate immediately before the
+// recovery enqueue so an assignment change or fresh active task cannot be
+// cancelled or bypass eligibility.
+func (q *Queries) LockTodoDispatchReclaimCandidate(ctx context.Context, arg LockTodoDispatchReclaimCandidateParams) (LockTodoDispatchReclaimCandidateRow, error) {
+	row := q.db.QueryRow(ctx, lockTodoDispatchReclaimCandidate, arg.ID, arg.CooldownSecs)
+	var i LockTodoDispatchReclaimCandidateRow
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.Title,
+		&i.Description,
+		&i.Status,
+		&i.Priority,
+		&i.AssigneeType,
+		&i.AssigneeID,
+		&i.CreatorType,
+		&i.CreatorID,
+		&i.ParentIssueID,
+		&i.AcceptanceCriteria,
+		&i.ContextRefs,
+		&i.Position,
+		&i.DueDate,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.Number,
+		&i.ProjectID,
+		&i.OriginType,
+		&i.OriginID,
+		&i.FirstExecutedAt,
+		&i.StartDate,
+		&i.Metadata,
+		&i.TargetAgentID,
+		&i.IsSquadRoute,
+		&i.LatestTaskID,
+		&i.LatestTaskStatus,
+		&i.LatestFailureReason,
+		&i.FailedTasksCount,
+		&i.TargetAgentArchivedAt,
+		&i.TargetRuntimeID,
+		&i.TargetMaxConcurrentTasks,
+		&i.TargetRuntimeStatus,
+		&i.TargetRunningTasks,
+	)
+	return i, err
 }
 
 const markAgentTaskWaitingLocalDirectory = `-- name: MarkAgentTaskWaitingLocalDirectory :one

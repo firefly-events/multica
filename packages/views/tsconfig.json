@@ -2,6 +2,7 @@
   "extends": "@multica/tsconfig/react-library.json",
   "compilerOptions": {
     "outDir": "dist",
+    "rootDir": ".",
     "paths": {
       "@claud-ometer/envelope": ["../../../Claud-ometer/src/lib/command/envelope.ts"]
     }
