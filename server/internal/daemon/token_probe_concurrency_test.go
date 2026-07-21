@@ -61,10 +61,12 @@ func TestSendWSHeartbeats_SlowProbeDoesNotDelayOtherRuntimes(t *testing.T) {
 	elapsed := time.Since(start)
 
 	// Serial execution of 3 slow probes would take ~900ms; the concurrent
-	// fan-out should land close to a single probeDelay. Bound generously at
-	// 2*probeDelay to absorb scheduling jitter without masking a regression
-	// back to serial behavior.
-	if elapsed > 2*probeDelay {
+	// fan-out should land close to a single probeDelay. Use fixed additive
+	// slack rather than a bare multiplier — a multiplier scales with (and
+	// gets eaten by) process-spawn/scheduler overhead on a busy machine,
+	// which is what made this test flake at ~13% before.
+	const overheadSlack = 400 * time.Millisecond
+	if elapsed > probeDelay+overheadSlack {
 		t.Fatalf("sendWSHeartbeats took %s for 3 runtimes each with a %s probe; want close to one probeDelay (concurrent), not the serial sum", elapsed, probeDelay)
 	}
 
@@ -118,8 +120,10 @@ func TestRegisterRuntimesForWorkspace_SlowProbeDoesNotDelayOtherProviders(t *tes
 
 	// Serial execution of 3 slow probes would take ~900ms; the concurrent
 	// fan-out in registerRuntimesForWorkspace (daemon.go) should land close
-	// to a single probeDelay.
-	if elapsed > 2*probeDelay {
+	// to a single probeDelay. Fixed additive slack, not a multiplier — see
+	// the matching comment in TestSendWSHeartbeats_SlowProbeDoesNotDelayOtherRuntimes.
+	const overheadSlack = 400 * time.Millisecond
+	if elapsed > probeDelay+overheadSlack {
 		t.Fatalf("registerRuntimesForWorkspace took %s for 3 providers each with a %s probe; want close to one probeDelay (concurrent), not the serial sum", elapsed, probeDelay)
 	}
 }
