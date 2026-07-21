@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -202,29 +203,48 @@ func (d *Daemon) runWSHeartbeatSender(ctx context.Context, runtimeIDs []string, 
 	}
 }
 
+// sendWSHeartbeats fires one heartbeat per runtime. Each runtime's token
+// probe (up to tokenProbeExecTimeout on a cold cache) runs on its own
+// goroutine so a stale/cold probe for one runtime cannot delay heartbeat
+// delivery for the others in the same tick (DOS-1037 review follow-up on
+// wakeup.go's prior sequential loop — see currentTokenStatus doc and
+// DOS-1256). The writes channel is safe for concurrent sends.
 func (d *Daemon) sendWSHeartbeats(ctx context.Context, runtimeIDs []string, writes chan<- []byte) {
+	var wg sync.WaitGroup
 	for _, rid := range runtimeIDs {
 		if ctx.Err() != nil {
-			return
+			break
 		}
-		frame, err := json.Marshal(protocol.Message{
-			Type:    protocol.EventDaemonHeartbeat,
-			Payload: marshalRaw(protocol.DaemonHeartbeatRequestPayload{RuntimeID: rid, SupportsBatchImport: true}),
-		})
-		if err != nil {
-			d.logger.Debug("ws heartbeat marshal failed", "error", err, "runtime_id", rid)
-			continue
-		}
-		select {
-		case writes <- frame:
-		case <-ctx.Done():
-			return
-		default:
-			// Writer is backed up; drop this beat. HTTP heartbeat will resume
-			// on its next tick once the freshness window expires.
-			d.logger.Debug("ws heartbeat dropped: writer backlog", "runtime_id", rid)
-		}
+		wg.Add(1)
+		go func(rid string) {
+			defer wg.Done()
+			tokenStatus := ""
+			if rt := d.findRuntime(rid); rt != nil {
+				tokenStatus = d.currentTokenStatus(ctx, rt.Provider)
+			}
+			frame, err := json.Marshal(protocol.Message{
+				Type: protocol.EventDaemonHeartbeat,
+				Payload: marshalRaw(protocol.DaemonHeartbeatRequestPayload{
+					RuntimeID:           rid,
+					SupportsBatchImport: true,
+					TokenStatus:         tokenStatus,
+				}),
+			})
+			if err != nil {
+				d.logger.Debug("ws heartbeat marshal failed", "error", err, "runtime_id", rid)
+				return
+			}
+			select {
+			case writes <- frame:
+			case <-ctx.Done():
+			default:
+				// Writer is backed up; drop this beat. HTTP heartbeat will resume
+				// on its next tick once the freshness window expires.
+				d.logger.Debug("ws heartbeat dropped: writer backlog", "runtime_id", rid)
+			}
+		}(rid)
 	}
+	wg.Wait()
 }
 
 func marshalRaw(v any) json.RawMessage {
