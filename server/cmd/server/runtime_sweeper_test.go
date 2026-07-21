@@ -812,6 +812,46 @@ func TestTodoDispatchReclaimSkipsWIPCap(t *testing.T) {
 	}
 }
 
+func TestTodoDispatchReclaimTripsBreaker(t *testing.T) {
+	if testPool == nil {
+		t.Skip("no database connection")
+	}
+
+	ctx := context.Background()
+	agentID, runtimeID := findIntegrationAgentRuntime(t)
+	issueID := createReclaimIssue(t, "Todo reclaim breaker", "agent", agentID)
+	t.Cleanup(func() { cleanupReclaimIssue(t, issueID) })
+	for i := 0; i < todoDispatchReclaimMaxAttempts; i++ {
+		insertFailedTask(t, agentID, runtimeID, issueID)
+	}
+
+	queries := db.New(testPool)
+	stats := sweepTodoDispatchReclaim(ctx, queries, service.NewTaskService(queries, nil, nil, events.New()))
+	if stats.Reclaimed != 0 || stats.Routed != 0 || stats.Failed != 0 {
+		t.Fatalf("unexpected stats: %+v", stats)
+	}
+	if stats.Skipped["breaker_tripped"] != 1 {
+		t.Fatalf("expected breaker_tripped skip, got %+v", stats.Skipped)
+	}
+	if queued := countQueuedTasksForIssue(t, issueID); queued != 0 {
+		t.Fatalf("expected no queued tasks once the breaker trips, got %d", queued)
+	}
+	if status := reclaimIssueStatus(t, issueID); status != "blocked" {
+		t.Fatalf("expected issue to be blocked once the breaker trips, got %q", status)
+	}
+}
+
+func reclaimIssueStatus(t *testing.T, issueID string) string {
+	t.Helper()
+	var status string
+	if err := testPool.QueryRow(context.Background(), `
+		SELECT status FROM issue WHERE id = $1
+	`, issueID).Scan(&status); err != nil {
+		t.Fatalf("failed to read issue status: %v", err)
+	}
+	return status
+}
+
 func findIntegrationAgentRuntime(t *testing.T) (string, string) {
 	t.Helper()
 	var agentID, runtimeID string
