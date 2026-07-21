@@ -18,6 +18,44 @@ func (s *stubWakeup) NotifyTaskAvailable(runtimeID, taskID string) {
 	s.calls = append(s.calls, struct{ runtimeID, taskID string }{runtimeID, taskID})
 }
 
+// TestWakeRuntimeForQueuedTasks_BumpsAndWakeups pins daemon reconnect recovery:
+// there is no new task row to pass through NotifyTaskEnqueued, but registration
+// must still invalidate stale empty-claim cache state and nudge the runtime so
+// tasks queued while the daemon was offline are claimed immediately.
+func TestWakeRuntimeForQueuedTasks_BumpsAndWakeups(t *testing.T) {
+	rdb := newRedisTestClient(t)
+	cache := NewEmptyClaimCache(rdb)
+	wakeup := &stubWakeup{}
+
+	svc := &TaskService{
+		EmptyClaim: cache,
+		Wakeup:     wakeup,
+	}
+
+	ctx := context.Background()
+	runtimeID := "rt-reconnect"
+	v0 := cache.CurrentVersion(ctx, runtimeID)
+	cache.MarkEmpty(ctx, runtimeID, v0)
+	if !cache.IsEmpty(ctx, runtimeID) {
+		t.Fatal("precondition: cache should report empty after MarkEmpty under current version")
+	}
+
+	svc.WakeRuntimeForQueuedTasks(runtimeID)
+
+	if cache.IsEmpty(ctx, runtimeID) {
+		t.Fatal("WakeRuntimeForQueuedTasks must Bump the version so reconnect claims bypass stale empty verdicts")
+	}
+	if got := len(wakeup.calls); got != 1 {
+		t.Fatalf("expected 1 wakeup call, got %d", got)
+	}
+	if wakeup.calls[0].runtimeID != runtimeID {
+		t.Fatalf("wakeup runtime mismatch: got %q want %q", wakeup.calls[0].runtimeID, runtimeID)
+	}
+	if wakeup.calls[0].taskID != "" {
+		t.Fatalf("reconnect wakeup task id = %q, want empty catch-up hint", wakeup.calls[0].taskID)
+	}
+}
+
 // TestNotifyTaskAvailable_BumpsBeforeWakeup pins the contract noted in
 // the EmptyClaimCache docs: the version Bump MUST run before the
 // daemon WS wakeup, otherwise the wakeup-driven claim could read a
