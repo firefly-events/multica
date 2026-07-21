@@ -907,6 +907,16 @@ func registerNotificationListeners(bus *events.Bus, queries *db.Queries) {
 			exclude[agentID] = true
 		}
 
+		failureReason, _ := payload["failure_reason"].(string)
+		taskID, _ := payload["task_id"].(string)
+		details, err := json.Marshal(map[string]string{
+			"failure_reason": failureReason,
+			"task_id":        taskID,
+		})
+		if err != nil {
+			details = emptyDetails
+		}
+
 		notifySubscribers(ctx, queries, bus, issueID, issue.Status, e.WorkspaceID,
 			events.Event{
 				Type:        e.Type,
@@ -916,7 +926,7 @@ func registerNotificationListeners(bus *events.Bus, queries *db.Queries) {
 			},
 			exclude, "task_failed", "action_required",
 			issue.Title, "",
-			emptyDetails)
+			details)
 	})
 }
 

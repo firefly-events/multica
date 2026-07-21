@@ -271,13 +271,25 @@ func handleTaskActivity(ctx context.Context, bus *events.Bus, queries *db.Querie
 		return
 	}
 
+	details := []byte("{}")
+	if action == "task_failed" {
+		failureReason, _ := payload["failure_reason"].(string)
+		taskID, _ := payload["task_id"].(string)
+		if marshalled, err := json.Marshal(map[string]string{
+			"failure_reason": failureReason,
+			"task_id":        taskID,
+		}); err == nil {
+			details = marshalled
+		}
+	}
+
 	activity, err := queries.CreateActivity(ctx, db.CreateActivityParams{
 		WorkspaceID: issue.WorkspaceID,
 		IssueID:     parseUUID(issueID),
 		ActorType:   util.StrToText("agent"),
 		ActorID:     parseUUID(agentID),
 		Action:      action,
-		Details:     []byte("{}"),
+		Details:     details,
 	})
 	if err != nil {
 		slog.Error("activity: failed to record task activity",
