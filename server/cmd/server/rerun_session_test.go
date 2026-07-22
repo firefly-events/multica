@@ -11,6 +11,7 @@ import (
 	"github.com/multica-ai/multica/server/internal/service"
 	"github.com/multica-ai/multica/server/internal/util"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
+	"github.com/multica-ai/multica/server/pkg/taskfailure"
 )
 
 // setupRerunTestFixture creates an issue assigned to the integration test
@@ -293,6 +294,79 @@ func TestCreateRetryTaskKeepsOrdinaryTimeoutSession(t *testing.T) {
 	}
 	if child.Attempt != 2 {
 		t.Fatalf("expected attempt 2, got %d", child.Attempt)
+	}
+}
+
+func TestCreateRetryTaskKeepsProviderFailureSession(t *testing.T) {
+	if testPool == nil {
+		t.Skip("no database connection")
+	}
+
+	tests := []struct {
+		name          string
+		failureReason taskfailure.Reason
+		sessionID     string
+		workDir       string
+	}{
+		{
+			name:          "capacity or rate limit",
+			failureReason: taskfailure.ReasonAgentProviderCapacityOrRateLimit,
+			sessionID:     "PROVIDER-CAPACITY-SESSION",
+			workDir:       "/tmp/provider-capacity",
+		},
+		{
+			name:          "server error",
+			failureReason: taskfailure.ReasonAgentProviderServerError,
+			sessionID:     "PROVIDER-SERVER-SESSION",
+			workDir:       "/tmp/provider-server",
+		},
+		{
+			name:          "network",
+			failureReason: taskfailure.ReasonAgentProviderNetwork,
+			sessionID:     "PROVIDER-NETWORK-SESSION",
+			workDir:       "/tmp/provider-network",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			issueID, agentID, runtimeID := setupRerunTestFixture(t)
+			t.Cleanup(func() { cleanupRerunFixture(t, issueID) })
+
+			ctx := context.Background()
+
+			var parentID string
+			if err := testPool.QueryRow(ctx, `
+				INSERT INTO agent_task_queue (
+					agent_id, runtime_id, issue_id, status, priority,
+					started_at, completed_at, session_id, work_dir, failure_reason,
+					attempt, max_attempts
+				)
+				VALUES ($1, $2, $3, 'failed', 0, now() - interval '1 minute', now() - interval '1 minute',
+				        $4, $5, $6, 1, 2)
+				RETURNING id
+			`, agentID, runtimeID, issueID, tt.sessionID, tt.workDir, tt.failureReason.String()).Scan(&parentID); err != nil {
+				t.Fatalf("insert provider failure parent task: %v", err)
+			}
+
+			queries := db.New(testPool)
+			child, err := queries.CreateRetryTask(ctx, pgtype.UUID{Bytes: parseUUIDBytes(parentID), Valid: true})
+			if err != nil {
+				t.Fatalf("CreateRetryTask failed: %v", err)
+			}
+			if !child.SessionID.Valid || child.SessionID.String != tt.sessionID {
+				t.Fatalf("expected retry child to inherit session_id %q, got %+v", tt.sessionID, child.SessionID)
+			}
+			if !child.WorkDir.Valid || child.WorkDir.String != tt.workDir {
+				t.Fatalf("expected retry child to inherit work_dir %q, got %+v", tt.workDir, child.WorkDir)
+			}
+			if child.ForceFreshSession {
+				t.Fatal("expected provider failure retry child to keep resume enabled")
+			}
+			if child.Attempt != 2 {
+				t.Fatalf("expected attempt 2, got %d", child.Attempt)
+			}
+		})
 	}
 }
 
