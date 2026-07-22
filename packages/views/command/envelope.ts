@@ -66,6 +66,74 @@ function hasSourceHealth(value: unknown): value is SourceHealth {
   return isRecord(value) && typeof value.ok === "boolean";
 }
 
+function hasOptionalNumber(value: unknown): value is number | null | undefined {
+  return value == null || typeof value === "number";
+}
+
+function hasOps(value: unknown): value is Envelope["ops"] {
+  if (!isRecord(value)) return false;
+  if (!Array.isArray(value.stuck) || !value.stuck.every((item) => isRecord(item) && typeof item.name === "string")) {
+    return false;
+  }
+  if (!isRecord(value.zombies) || !isRecord(value.burn) || !Array.isArray(value.errors)) {
+    return false;
+  }
+  return (
+    hasOptionalNumber(value.zombies.opencode) &&
+    hasOptionalNumber(value.zombies.claude) &&
+    hasOptionalNumber(value.zombies.daemonCap) &&
+    hasOptionalNumber(value.burn.totalTokens) &&
+    hasOptionalNumber(value.burn.costUSD) &&
+    value.errors.every((line) => typeof line === "string")
+  );
+}
+
+function hasUsage(value: unknown): value is Envelope["usage"] {
+  if (!isRecord(value) || !isRecord(value.gemini) || !isRecord(value.tokens)) {
+    return false;
+  }
+  return (
+    hasOptionalNumber(value.claudePct) &&
+    hasOptionalNumber(value.sessionPct) &&
+    (value.resetAt == null || typeof value.resetAt === "string") &&
+    hasOptionalNumber(value.gemini.rpdUsed) &&
+    hasOptionalNumber(value.gemini.rpdLimit) &&
+    hasOptionalNumber(value.tokens.inputTokens) &&
+    hasOptionalNumber(value.tokens.outputTokens) &&
+    hasOptionalNumber(value.tokens.totalTokens) &&
+    hasOptionalNumber(value.tokens.costUSD)
+  );
+}
+
+function hasAgents(value: unknown): value is Envelope["agents"] {
+  if (!isRecord(value) || !Array.isArray(value.nodes) || !Array.isArray(value.edges)) {
+    return false;
+  }
+  return value.nodes.every(
+    (node) =>
+      isRecord(node) &&
+      typeof node.id === "string" &&
+      typeof node.label === "string" &&
+      typeof node.kind === "string" &&
+      typeof node.status === "string",
+  );
+}
+
+function hasClients(value: unknown): value is Envelope["clients"] {
+  return (
+    Array.isArray(value) &&
+    value.every(
+      (client) =>
+        isRecord(client) &&
+        typeof client.name === "string" &&
+        typeof client.status === "string" &&
+        (client.stage == null || typeof client.stage === "string" || typeof client.stage === "number") &&
+        (client.stageName == null || typeof client.stageName === "string") &&
+        (client.blocked == null || typeof client.blocked === "string"),
+    )
+  );
+}
+
 export function isEnvelope(value: unknown): value is Envelope {
   if (!isRecord(value) || !isRecord(value.sources)) return false;
   return (
@@ -75,9 +143,9 @@ export function isEnvelope(value: unknown): value is Envelope {
     hasSourceHealth(value.sources.usage) &&
     hasSourceHealth(value.sources.agents) &&
     hasSourceHealth(value.sources.clients) &&
-    isRecord(value.ops) &&
-    isRecord(value.usage) &&
-    isRecord(value.agents) &&
-    Array.isArray(value.clients)
+    hasOps(value.ops) &&
+    hasUsage(value.usage) &&
+    hasAgents(value.agents) &&
+    hasClients(value.clients)
   );
 }

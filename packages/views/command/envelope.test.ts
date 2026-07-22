@@ -7,7 +7,7 @@ function validEnvelope(): Envelope {
     ts: "2026-07-22T13:00:00Z",
     sources: {
       ops: { ok: true },
-      usage: { ok: true },
+      usage: { ok: true, stub: false },
       agents: { ok: true },
       clients: { ok: true },
     },
@@ -48,7 +48,7 @@ function validEnvelope(): Envelope {
           status: "running",
         },
       ],
-      edges: [],
+      edges: [{ source: "agent-1", target: "agent-2" }],
     },
     clients: [
       {
@@ -79,6 +79,13 @@ describe("isEnvelope", () => {
         sources: { ...validEnvelope().sources, ops: {} },
       }),
     ],
+    [
+      "source entry has wrong-typed ok",
+      () => ({
+        ...validEnvelope(),
+        sources: { ...validEnvelope().sources, ops: { ok: "yes" } },
+      }),
+    ],
     ["clients is null", () => ({ ...validEnvelope(), clients: null })],
     ["clients is an object", () => ({ ...validEnvelope(), clients: {} })],
   ])("rejects malformed envelope data: %s", (_name, makeValue) => {
@@ -91,4 +98,30 @@ describe("isEnvelope", () => {
       expect(isEnvelope(value)).toBe(false);
     },
   );
+
+  it.each([
+    [
+      "agent nodes without required fields",
+      () => ({
+        ...validEnvelope(),
+        agents: { ...validEnvelope().agents, nodes: [{ id: "agent-1", label: "Agent 1" }] },
+      }),
+    ],
+    [
+      "non-string ops errors",
+      () => ({
+        ...validEnvelope(),
+        ops: { ...validEnvelope().ops, errors: [123] },
+      }),
+    ],
+    [
+      "client entries with non-string status",
+      () => ({
+        ...validEnvelope(),
+        clients: [{ name: "codex", status: 200 }],
+      }),
+    ],
+  ])("rejects malformed nested UI data: %s", (_name, makeValue) => {
+    expect(isEnvelope(makeValue())).toBe(false);
+  });
 });
