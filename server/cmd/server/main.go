@@ -16,6 +16,7 @@ import (
 	"github.com/multica-ai/multica/server/internal/daemonws"
 	"github.com/multica-ai/multica/server/internal/events"
 	"github.com/multica-ai/multica/server/internal/handler"
+	"github.com/multica-ai/multica/server/internal/judge"
 	"github.com/multica-ai/multica/server/internal/logger"
 	obsmetrics "github.com/multica-ai/multica/server/internal/metrics"
 	"github.com/multica-ai/multica/server/internal/realtime"
@@ -378,11 +379,29 @@ func main() {
 	schedulerMgr := scheduler.NewManager(pool, scheduler.Options{})
 	if err := schedulerMgr.Register(scheduler.TaskUsageHourlyJob(pool)); err != nil {
 		slog.Warn("scheduler: failed to register task_usage_hourly rollup job", "error", err)
-	} else {
-		go func() {
-			_ = schedulerMgr.Run(sweepCtx)
-		}()
 	}
+
+	// DOS-860: sampled LLM-as-judge scoring pass. Registered only when
+	// an Anthropic API key is configured — with no key there is no
+	// judge to call, so the job would just fail every attempt.
+	if apiKey := os.Getenv("JUDGE_ANTHROPIC_API_KEY"); apiKey != "" {
+		judgeModel := os.Getenv("JUDGE_MODEL")
+		if judgeModel == "" {
+			judgeModel = "claude-opus-4.8"
+		}
+		judgeCfg := scheduler.DefaultJudgeScoreSamplerConfig()
+		if rate, ok := envFloatInUnitInterval("JUDGE_SAMPLE_RATE"); ok {
+			judgeCfg.SampleRate = rate
+		}
+		anthropicJudge := judge.NewAnthropicJudge(apiKey, judgeModel, nil)
+		if err := schedulerMgr.Register(scheduler.JudgeScoreSamplerJob(pool, anthropicJudge, judgeCfg)); err != nil {
+			slog.Warn("scheduler: failed to register judge_score_sampler job", "error", err)
+		}
+	}
+
+	go func() {
+		_ = schedulerMgr.Run(sweepCtx)
+	}()
 
 	if metricsServer != nil {
 		go func() {

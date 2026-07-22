@@ -44,6 +44,7 @@ import type {
   CreatePersonalAccessTokenResponse,
   RuntimeUsage,
   IssueUsageSummary,
+  JudgeScore,
   RuntimeHourlyActivity,
   RuntimeUsageByAgent,
   RuntimeUsageByHour,
@@ -193,6 +194,8 @@ import {
   EMPTY_BILLING_CHECKOUT_SESSION_STATUS,
   EMPTY_CREATE_BILLING_PORTAL_SESSION_RESPONSE,
   EMPTY_CANCEL_TASK_RESPONSE,
+  JudgeScoreListSchema,
+  EMPTY_JUDGE_SCORE_LIST,
 } from "./schemas";
 
 /** Identifies the calling client to the server.
@@ -1325,6 +1328,13 @@ export class ApiClient {
 
   async listTaskMessages(taskId: string): Promise<TaskMessagePayload[]> {
     return this.fetch(`/api/tasks/${taskId}/messages`);
+  }
+
+  async listJudgeScores(taskId: string): Promise<JudgeScore[]> {
+    const raw = await this.fetch<unknown>(`/api/tasks/${taskId}/judge-scores`);
+    return parseWithFallback(raw, JudgeScoreListSchema, EMPTY_JUDGE_SCORE_LIST, {
+      endpoint: "GET /api/tasks/{taskId}/judge-scores",
+    });
   }
 
   async listTasksByIssue(issueId: string): Promise<AgentTask[]> {

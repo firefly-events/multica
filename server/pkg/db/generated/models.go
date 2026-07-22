@@ -447,6 +447,32 @@ type IssueToLabel struct {
 	LabelID pgtype.UUID `json:"label_id"`
 }
 
+type JudgeSampleDecision struct {
+	TaskID    pgtype.UUID        `json:"task_id"`
+	Sampled   bool               `json:"sampled"`
+	DecidedAt pgtype.Timestamptz `json:"decided_at"`
+}
+
+type JudgeScore struct {
+	ID                  pgtype.UUID        `json:"id"`
+	TaskID              pgtype.UUID        `json:"task_id"`
+	JudgeProvider       string             `json:"judge_provider"`
+	JudgeModel          string             `json:"judge_model"`
+	CorrectnessScore    int32              `json:"correctness_score"`
+	AdherenceScore      int32              `json:"adherence_score"`
+	ToneScore           int32              `json:"tone_score"`
+	ClarityScore        int32              `json:"clarity_score"`
+	TrajectoryScore     int32              `json:"trajectory_score"`
+	OverallScore        int32              `json:"overall_score"`
+	Rationale           string             `json:"rationale"`
+	TrajectoryRationale string             `json:"trajectory_rationale"`
+	CalibrationStatus   string             `json:"calibration_status"`
+	InputTokens         int64              `json:"input_tokens"`
+	OutputTokens        int64              `json:"output_tokens"`
+	CostUsd             pgtype.Numeric     `json:"cost_usd"`
+	CreatedAt           pgtype.Timestamptz `json:"created_at"`
+}
+
 type LarkBindingToken struct {
 	TokenHash      string             `json:"token_hash"`
 	WorkspaceID    pgtype.UUID        `json:"workspace_id"`

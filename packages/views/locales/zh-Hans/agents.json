@@ -445,7 +445,17 @@
     "no_data": "未记录执行数据。",
     "sort_label": "排序",
     "sort_chronological": "时间顺序",
-    "sort_newest_first": "最新在前"
+    "sort_newest_first": "最新在前",
+    "judge_score": {
+      "title": "评审分数",
+      "modeled_tooltip": "建模分数，尚未与人工审核校准",
+      "overall": "总分 {{score}}/100",
+      "correctness": "正确性",
+      "adherence": "遵循度",
+      "tone": "语气",
+      "clarity": "清晰度",
+      "trajectory": "执行路径"
+    }
   },
   "task_failure": {
     "agent_error": "智能体执行出错",
