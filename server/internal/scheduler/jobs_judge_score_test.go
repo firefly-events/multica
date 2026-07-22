@@ -159,7 +159,12 @@ const bigBatchLimit = int32(20000)
 // for every completed task.
 func TestJudgeScoreSamplerScoresSampledSubset(t *testing.T) {
 	pool := integrationPool(t)
-	t.Cleanup(func() { pool.Exec(context.Background(), `DELETE FROM judge_score`) })
+	// No separate judge_score cleanup here: seedJudgeFixture's own
+	// t.Cleanup deletes the fixture workspace, which cascades through
+	// agent -> agent_task_queue -> judge_score/judge_sample_decision. A
+	// bare `DELETE FROM judge_score` would instead wipe every row in
+	// whatever database DATABASE_URL points at (the shared local dev DB
+	// when unset), not just this test's fixture rows.
 	fx := seedJudgeFixture(t, pool, 20)
 
 	fake := passingFakeJudge("claude-opus-4.8")
@@ -209,7 +214,12 @@ func TestJudgeScoreSamplerScoresSampledSubset(t *testing.T) {
 // tasks exist.
 func TestJudgeScoreSamplerZeroRateScoresNothing(t *testing.T) {
 	pool := integrationPool(t)
-	t.Cleanup(func() { pool.Exec(context.Background(), `DELETE FROM judge_score`) })
+	// No separate judge_score cleanup here: seedJudgeFixture's own
+	// t.Cleanup deletes the fixture workspace, which cascades through
+	// agent -> agent_task_queue -> judge_score/judge_sample_decision. A
+	// bare `DELETE FROM judge_score` would instead wipe every row in
+	// whatever database DATABASE_URL points at (the shared local dev DB
+	// when unset), not just this test's fixture rows.
 	fx := seedJudgeFixture(t, pool, 10)
 
 	fake := passingFakeJudge("claude-opus-4.8")
@@ -241,7 +251,12 @@ func TestJudgeScoreSamplerZeroRateScoresNothing(t *testing.T) {
 // pool entirely.
 func TestJudgeScoreSamplerSkipsAlreadyScoredTasks(t *testing.T) {
 	pool := integrationPool(t)
-	t.Cleanup(func() { pool.Exec(context.Background(), `DELETE FROM judge_score`) })
+	// No separate judge_score cleanup here: seedJudgeFixture's own
+	// t.Cleanup deletes the fixture workspace, which cascades through
+	// agent -> agent_task_queue -> judge_score/judge_sample_decision. A
+	// bare `DELETE FROM judge_score` would instead wipe every row in
+	// whatever database DATABASE_URL points at (the shared local dev DB
+	// when unset), not just this test's fixture rows.
 	fx := seedJudgeFixture(t, pool, 5)
 
 	fake := passingFakeJudge("claude-opus-4.8")
