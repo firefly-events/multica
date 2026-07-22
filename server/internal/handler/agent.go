@@ -243,6 +243,7 @@ type AgentTaskResponse struct {
 	Result           any                   `json:"result"`
 	Error            *string               `json:"error"`
 	FailureReason    string                `json:"failure_reason,omitempty"` // see TaskService.MaybeRetryFailedTask
+	DeathNote        json.RawMessage       `json:"death_note,omitempty"`     // structured parent failure context for auto-retry continuations
 	Attempt          int32                 `json:"attempt"`
 	MaxAttempts      int32                 `json:"max_attempts"`
 	ParentTaskID     *string               `json:"parent_task_id,omitempty"`
@@ -391,6 +392,7 @@ func taskToResponse(t db.AgentTaskQueue, workspaceID string) AgentTaskResponse {
 		Result:           result,
 		Error:            textToPtr(t.Error),
 		FailureReason:    failureReason,
+		DeathNote:        deathNoteFromTaskContext(t.Context),
 		Attempt:          t.Attempt,
 		MaxAttempts:      t.MaxAttempts,
 		ParentTaskID:     uuidToPtr(t.ParentTaskID),
@@ -406,6 +408,21 @@ func taskToResponse(t db.AgentTaskQueue, workspaceID string) AgentTaskResponse {
 		AutopilotRunID: uuidToString(t.AutopilotRunID),
 		Kind:           computeTaskKind(t),
 	}
+}
+
+func deathNoteFromTaskContext(raw []byte) json.RawMessage {
+	if len(bytes.TrimSpace(raw)) == 0 {
+		return nil
+	}
+	var payload map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		return nil
+	}
+	note := bytes.TrimSpace(payload["death_note"])
+	if len(note) == 0 || bytes.Equal(note, []byte("null")) {
+		return nil
+	}
+	return append(json.RawMessage(nil), note...)
 }
 
 // relativeWorkDir produces a privacy-safe display form of the daemon-reported

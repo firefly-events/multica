@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -47,6 +48,27 @@ func TestBuildQuickCreatePromptRules(t *testing.T) {
 	for _, s := range mustContain {
 		if !strings.Contains(out, s) {
 			t.Errorf("buildQuickCreatePrompt output missing required rule: %q", s)
+		}
+	}
+}
+
+func TestBuildPromptIncludesDeathNote(t *testing.T) {
+	note := json.RawMessage(`{"parent_task_id":"parent-1","failure_reason":"timeout","resume_safe":true,"error_tail":"lost runtime","continuation_hint":"continue from the failed attempt"}`)
+	out := BuildPrompt(Task{
+		IssueID:   "issue-1",
+		DeathNote: note,
+	}, "codex")
+
+	for _, want := range []string{
+		"## Parent Task Death Note",
+		"previous attempt died",
+		`"parent_task_id":"parent-1"`,
+		`"failure_reason":"timeout"`,
+		`"resume_safe":true`,
+		"Start by running `multica issue get issue-1 --output json`",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("prompt missing %q\n--- output ---\n%s", want, out)
 		}
 	}
 }
