@@ -437,7 +437,17 @@
     "no_data": "記録された実行データがありません。",
     "sort_label": "並び替え",
     "sort_chronological": "古い順",
-    "sort_newest_first": "新しい順"
+    "sort_newest_first": "新しい順",
+    "judge_score": {
+      "title": "審査スコア",
+      "modeled_tooltip": "モデルによる推定スコアです。まだ人によるレビューと校正されていません",
+      "overall": "総合 {{score}}/100",
+      "correctness": "正確性",
+      "adherence": "指示遵守",
+      "tone": "トーン",
+      "clarity": "明確さ",
+      "trajectory": "実行経路"
+    }
   },
   "task_failure": {
     "agent_error": "エージェント実行エラー",

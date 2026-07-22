@@ -51,6 +51,31 @@ type TaskMessagePayload struct {
 	CreatedAt string         `json:"created_at,omitempty"`
 }
 
+// JudgeScorePayload represents one LLM-as-judge rubric pass over a
+// completed task (DOS-860). CalibrationStatus is always "MODELED" until
+// the future calibration story validates these numbers against human
+// review — the frontend must render that label rather than presenting
+// scores as ground truth.
+type JudgeScorePayload struct {
+	ID                  string `json:"id"`
+	TaskID              string `json:"task_id"`
+	JudgeProvider       string `json:"judge_provider"`
+	JudgeModel          string `json:"judge_model"`
+	CorrectnessScore    int    `json:"correctness_score"`
+	AdherenceScore      int    `json:"adherence_score"`
+	ToneScore           int    `json:"tone_score"`
+	ClarityScore        int    `json:"clarity_score"`
+	TrajectoryScore     int    `json:"trajectory_score"`
+	OverallScore        int    `json:"overall_score"`
+	Rationale           string `json:"rationale"`
+	TrajectoryRationale string `json:"trajectory_rationale"`
+	CalibrationStatus   string `json:"calibration_status"`
+	InputTokens         int64  `json:"input_tokens"`
+	OutputTokens        int64  `json:"output_tokens"`
+	CostUsd             string `json:"cost_usd"`
+	CreatedAt           string `json:"created_at"`
+}
+
 // DaemonRegisterPayload is sent from daemon to server on connection.
 type DaemonRegisterPayload struct {
 	DaemonID string        `json:"daemon_id"`

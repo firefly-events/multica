@@ -39,6 +39,7 @@ import { useTranscriptViewStore, type TranscriptSortDirection } from "@multica/c
 import type { AgentTask, Agent, AgentRuntime } from "@multica/core/types/agent";
 import { redactSecrets } from "./redact";
 import type { TimelineItem } from "./build-timeline";
+import { JudgeScoreSection } from "./judge-score-section";
 import { useT } from "../../i18n";
 
 interface AgentTranscriptDialogProps {
@@ -542,6 +543,9 @@ export function AgentTranscriptDialog({
             {headerSlot}
           </div>
         )}
+
+        {/* ── Judge score (DOS-860), only present for sampled tasks ── */}
+        <JudgeScoreSection taskId={task.id} taskStatus={task.status} />
 
         {/* ── Event list ─────────────────────────────────────────── */}
         <div

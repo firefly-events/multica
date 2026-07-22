@@ -457,7 +457,17 @@
     "no_data": "No execution data recorded.",
     "sort_label": "Sort",
     "sort_chronological": "Oldest first",
-    "sort_newest_first": "Newest first"
+    "sort_newest_first": "Newest first",
+    "judge_score": {
+      "title": "Judge score",
+      "modeled_tooltip": "Modeled score, not yet calibrated against human review",
+      "overall": "Overall {{score}}/100",
+      "correctness": "Correctness",
+      "adherence": "Adherence",
+      "tone": "Tone",
+      "clarity": "Clarity",
+      "trajectory": "Trajectory"
+    }
   },
   "task_failure": {
     "agent_error": "Agent execution error",

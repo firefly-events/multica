@@ -15,6 +15,7 @@ import type {
   CreateBillingCheckoutSessionResponse,
   CreateBillingPortalSessionResponse,
   GroupedIssuesResponse,
+  JudgeScore,
   ListIssuesResponse,
   ListWebhookDeliveriesResponse,
   Squad,
@@ -481,6 +482,39 @@ export const EMPTY_CANCEL_TASK_RESPONSE: CancelTaskResponse = {
   error: null,
   created_at: "",
 };
+
+// ---------------------------------------------------------------------------
+// Judge scores (`GET /api/tasks/:id/judge-scores`, DOS-860)
+//
+// `calibration_status` defaults to "MODELED" rather than trusting the
+// server value blindly — if a future server rolls back or a field goes
+// missing, the UI must keep labeling scores as unvalidated instead of
+// silently rendering them as calibrated ground truth.
+// ---------------------------------------------------------------------------
+
+const JudgeScoreSchema = z.object({
+  id: z.string(),
+  task_id: z.string(),
+  judge_provider: z.string().default(""),
+  judge_model: z.string().default(""),
+  correctness_score: z.number().default(0),
+  adherence_score: z.number().default(0),
+  tone_score: z.number().default(0),
+  clarity_score: z.number().default(0),
+  trajectory_score: z.number().default(0),
+  overall_score: z.number().default(0),
+  rationale: z.string().default(""),
+  trajectory_rationale: z.string().default(""),
+  calibration_status: z.string().default("MODELED"),
+  input_tokens: z.number().default(0),
+  output_tokens: z.number().default(0),
+  cost_usd: z.string().default("0"),
+  created_at: z.string().default(""),
+}).loose();
+
+export const JudgeScoreListSchema = z.array(JudgeScoreSchema);
+
+export const EMPTY_JUDGE_SCORE_LIST: JudgeScore[] = [];
 
 // ---------------------------------------------------------------------------
 // Agent template catalog — `/api/agent-templates*` and the

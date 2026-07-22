@@ -442,6 +442,32 @@ export interface IssueUsageSummary {
   task_count: number;
 }
 
+/**
+ * One LLM-as-judge rubric pass over a completed task (DOS-860).
+ * `calibration_status` is always "MODELED" until a future calibration
+ * story validates these numbers against human review — the UI must
+ * render that label rather than presenting scores as ground truth.
+ */
+export interface JudgeScore {
+  id: string;
+  task_id: string;
+  judge_provider: string;
+  judge_model: string;
+  correctness_score: number;
+  adherence_score: number;
+  tone_score: number;
+  clarity_score: number;
+  trajectory_score: number;
+  overall_score: number;
+  rationale: string;
+  trajectory_rationale: string;
+  calibration_status: string;
+  input_tokens: number;
+  output_tokens: number;
+  cost_usd: string;
+  created_at: string;
+}
+
 export interface RuntimeUsage {
   runtime_id: string;
   date: string;
