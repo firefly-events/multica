@@ -100,13 +100,20 @@ func Classify(rawError string) Reason {
 		return ReasonAgentProviderAuthOrAccess
 
 	// 4. Quota / billing. 402 / insufficient balance / monthly usage
-	//    limit / credits exhausted.
+	//    limit / credits exhausted. Also covers provider session/plan
+	//    limit phrasings surfaced verbatim by CLI backends (DOS-1444):
+	//    "You've hit your session limit", "You've reached your Fable 5
+	//    limit". These reset on a schedule like the other quota-bucket
+	//    errors, so they share its reason and are eligible for the
+	//    retry-with-backoff path (retryableReasons in
+	//    internal/service/task.go).
 	case containsAny(lower,
 		"402",
 		"insufficient_balance",
 		"balance is too low",
 		"monthly usage limit",
 		"usage limit",
+		"session limit",
 		"you've hit your limit",
 		// Curly apostrophe variant: providers and copy-pasted error
 		// strings sometimes use U+2019 instead of ASCII '. SQL ILIKE
@@ -115,7 +122,8 @@ func Classify(rawError string) Reason {
 		"you\u2019ve hit your limit",
 		"credits",
 		"quota",
-	):
+	),
+		strings.Contains(lower, "reached your") && strings.Contains(lower, "limit"):
 		return ReasonAgentProviderQuotaLimit
 
 	// 5. Capacity / rate limit. 429 / 529 / overloaded / rate limit.

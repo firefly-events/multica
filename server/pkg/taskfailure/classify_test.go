@@ -72,6 +72,9 @@ func TestClassifyRules(t *testing.T) {
 		{"hit your limit curly", "you\u2019ve hit your limit", ReasonAgentProviderQuotaLimit},
 		{"credits", "Your account has 0 credits remaining", ReasonAgentProviderQuotaLimit},
 		{"quota", "quota exceeded for project foo", ReasonAgentProviderQuotaLimit},
+		{"session limit", "You've hit your session limit", ReasonAgentProviderQuotaLimit},
+		{"fable 5 limit", "You've reached your Fable 5 limit", ReasonAgentProviderQuotaLimit},
+		{"insufficient credits openrouter", "Insufficient credits to complete this request", ReasonAgentProviderQuotaLimit},
 
 		// 5. Capacity / rate limit.
 		{"429", "API Error: 429 Too Many Requests", ReasonAgentProviderCapacityOrRateLimit},

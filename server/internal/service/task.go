@@ -1495,11 +1495,29 @@ func (s *TaskService) FailTask(ctx context.Context, taskID pgtype.UUID, errMsg, 
 // allowed to act on. Agent-side errors (compile failures, model rejections,
 // etc.) are intentionally excluded — those are real problems that the user
 // should see, not infrastructure flakiness.
+//
+// DOS-1444: provider rate/capacity-limit and quota/session-limit errors
+// (429/529/"rate limit"/"overloaded", and 402/quota/"session limit"/
+// "Fable 5 limit"/insufficient-credits phrasings classified by
+// taskfailure.Classify) are retryable-after-reset conditions, not
+// permanent failures — they were previously recorded as terminal
+// `status: failed` on attempt 1 even though max_attempts allows a second
+// try. queued_expired is included for the same reason: a task that sat
+// past the queue TTL without being claimed is a capacity/timing symptom,
+// not a fault in the task itself, so it gets one more attempt rather than
+// terminal-failing outright.
+//
+// Note: MaybeRetryFailedTask still skips autopilot-owned tasks
+// (parent.AutopilotRunID.Valid) regardless of reason — the autopilot
+// scheduler owns its own re-run cadence for those.
 var retryableReasons = map[string]bool{
-	"runtime_offline":           true,
-	"runtime_recovery":          true,
-	"timeout":                   true,
-	"codex_semantic_inactivity": true,
+	"runtime_offline":                       true,
+	"runtime_recovery":                      true,
+	"timeout":                               true,
+	"codex_semantic_inactivity":             true,
+	string(taskfailure.ReasonQueuedExpired): true,
+	string(taskfailure.ReasonAgentProviderCapacityOrRateLimit): true,
+	string(taskfailure.ReasonAgentProviderQuotaLimit):          true,
 }
 
 func resumeUnsafeFailureReason(reason string) bool {
