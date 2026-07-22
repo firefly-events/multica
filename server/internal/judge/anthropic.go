@@ -58,6 +58,7 @@ func NewAnthropicJudge(apiKey, model string, httpClient *http.Client) *Anthropic
 type anthropicRequest struct {
 	Model      string              `json:"model"`
 	MaxTokens  int                 `json:"max_tokens"`
+	System     string              `json:"system,omitempty"`
 	Messages   []anthropicMessage  `json:"messages"`
 	Tools      []anthropicTool     `json:"tools"`
 	ToolChoice anthropicToolChoice `json:"tool_choice"`
@@ -114,6 +115,7 @@ func (j *AnthropicJudge) Score(ctx context.Context, in Input) (Result, error) {
 	reqBody := anthropicRequest{
 		Model:     j.Model,
 		MaxTokens: 2048,
+		System:    judgeSystemPrompt,
 		Messages: []anthropicMessage{
 			{Role: "user", Content: prompt},
 		},
