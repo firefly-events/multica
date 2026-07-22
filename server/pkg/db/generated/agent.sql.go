@@ -944,11 +944,85 @@ INSERT INTO agent_task_queue (
 )
 SELECT
     p.agent_id, p.runtime_id, p.issue_id, p.chat_session_id, p.autopilot_run_id,
-    'queued', p.priority, p.trigger_comment_id, p.trigger_summary, p.context,
-    CASE WHEN p.failure_reason IS NOT DISTINCT FROM 'codex_semantic_inactivity' THEN NULL ELSE p.session_id END,
-    CASE WHEN p.failure_reason IS NOT DISTINCT FROM 'codex_semantic_inactivity' THEN NULL ELSE p.work_dir END,
+    'queued', p.priority, p.trigger_comment_id, p.trigger_summary,
+    jsonb_set(
+        COALESCE(p.context, '{}'::jsonb),
+        '{death_note}',
+        jsonb_strip_nulls(jsonb_build_object(
+            'parent_task_id', p.id,
+            'failure_reason', COALESCE(p.failure_reason, 'agent_error'),
+            'failed_at', COALESCE(p.completed_at, now()),
+            'error_tail', NULLIF(right(COALESCE(p.error, ''), 4000), ''),
+            'output_tail', NULLIF(right(COALESCE(p.result::text, ''), 4000), ''),
+            'attempt', p.attempt,
+            'max_attempts', p.max_attempts,
+            'resume_safe', NOT (
+                COALESCE(p.failure_reason, '') IN (
+                    'iteration_limit',
+                    'agent_fallback_message',
+                    'api_invalid_request',
+                    'codex_semantic_inactivity'
+                )
+            ),
+            'session_id', CASE
+                WHEN COALESCE(p.failure_reason, '') IN (
+                    'iteration_limit',
+                    'agent_fallback_message',
+                    'api_invalid_request',
+                    'codex_semantic_inactivity'
+                ) THEN NULL
+                ELSE NULLIF(p.session_id, '')
+            END,
+            'work_dir', CASE
+                WHEN COALESCE(p.failure_reason, '') IN (
+                    'iteration_limit',
+                    'agent_fallback_message',
+                    'api_invalid_request',
+                    'codex_semantic_inactivity'
+                ) THEN NULL
+                ELSE NULLIF(p.work_dir, '')
+            END,
+            'files_touched_available', false,
+            'files_touched', '[]'::jsonb,
+            'continuation_hint', CASE
+                WHEN COALESCE(p.failure_reason, '') IN (
+                    'iteration_limit',
+                    'agent_fallback_message',
+                    'api_invalid_request',
+                    'codex_semantic_inactivity'
+                )
+                    THEN 'Start a fresh session. Use this death note to recover partial progress; do not resume the poisoned parent session.'
+                ELSE
+                    'Continue from the parent task failure context. Resume the pinned session/workdir when the runtime supports it; otherwise use this note to avoid restarting from scratch.'
+            END
+        )),
+        true
+    ),
+    CASE
+        WHEN COALESCE(p.failure_reason, '') IN (
+            'iteration_limit',
+            'agent_fallback_message',
+            'api_invalid_request',
+            'codex_semantic_inactivity'
+        ) THEN NULL
+        ELSE p.session_id
+    END,
+    CASE
+        WHEN COALESCE(p.failure_reason, '') IN (
+            'iteration_limit',
+            'agent_fallback_message',
+            'api_invalid_request',
+            'codex_semantic_inactivity'
+        ) THEN NULL
+        ELSE p.work_dir
+    END,
     p.attempt + 1, p.max_attempts, p.id,
-    p.failure_reason IS NOT DISTINCT FROM 'codex_semantic_inactivity',
+    COALESCE(p.failure_reason, '') IN (
+        'iteration_limit',
+        'agent_fallback_message',
+        'api_invalid_request',
+        'codex_semantic_inactivity'
+    ),
     p.is_leader_task
 FROM agent_task_queue p
 WHERE p.id = $1
@@ -957,13 +1031,15 @@ RETURNING id, agent_id, issue_id, status, priority, dispatched_at, started_at, c
 
 // Clones a parent task into a fresh queued attempt. Carries forward the
 // agent's resume context (session_id/work_dir) so the child can continue
-// the conversation when the backend supports it. Resume-unsafe failures are
-// retried as fresh sessions so the child does not inherit a stuck agent
-// conversation. Keep the CASE WHEN predicates in sync with
-// resumeUnsafeFailureReason and the resume lookup blacklists. attempt is
-// incremented; max_attempts, trigger_comment_id, and is_leader_task are
-// inherited so the retried task keeps the same squad-role provenance as its
-// parent and the self-trigger guard in shouldEnqueueSquadLeaderOnComment
+// the conversation when the backend supports it, and stores a structured
+// death_note in context JSONB so fresh-session continuations still receive
+// the failure reason, output/error tails, parent pointer, and continuation
+// hint. Resume-unsafe failures are retried as fresh sessions so the child
+// does not inherit a stuck agent conversation. Keep the CASE WHEN predicates
+// in sync with resumeUnsafeFailureReason and the resume lookup blacklists.
+// attempt is incremented; max_attempts, trigger_comment_id, and is_leader_task
+// are inherited so the retried task keeps the same squad-role provenance as
+// its parent and the self-trigger guard in shouldEnqueueSquadLeaderOnComment
 // continues to recognise it as a leader task.
 func (q *Queries) CreateRetryTask(ctx context.Context, id pgtype.UUID) (AgentTaskQueue, error) {
 	row := q.db.QueryRow(ctx, createRetryTask, id)

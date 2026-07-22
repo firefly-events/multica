@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgtype"
@@ -12,6 +14,13 @@ import (
 	"github.com/multica-ai/multica/server/internal/util"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 )
+
+func tail(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[len(s)-n:]
+}
 
 // setupRerunTestFixture creates an issue assigned to the integration test
 // agent and returns (issueID, agentID, runtimeID).
@@ -293,6 +302,124 @@ func TestCreateRetryTaskKeepsOrdinaryTimeoutSession(t *testing.T) {
 	}
 	if child.Attempt != 2 {
 		t.Fatalf("expected attempt 2, got %d", child.Attempt)
+	}
+
+	var ctxPayload map[string]json.RawMessage
+	if err := json.Unmarshal(child.Context, &ctxPayload); err != nil {
+		t.Fatalf("retry child context is not JSON: %v", err)
+	}
+	var note struct {
+		ParentTaskID          string   `json:"parent_task_id"`
+		FailureReason         string   `json:"failure_reason"`
+		ErrorTail             string   `json:"error_tail"`
+		OutputTail            string   `json:"output_tail"`
+		SessionID             string   `json:"session_id"`
+		WorkDir               string   `json:"work_dir"`
+		ResumeSafe            bool     `json:"resume_safe"`
+		FilesTouchedAvailable bool     `json:"files_touched_available"`
+		FilesTouched          []string `json:"files_touched"`
+		ContinuationHint      string   `json:"continuation_hint"`
+		Attempt               int32    `json:"attempt"`
+		MaxAttempts           int32    `json:"max_attempts"`
+	}
+	if err := json.Unmarshal(ctxPayload["death_note"], &note); err != nil {
+		t.Fatalf("death_note missing or invalid: %v", err)
+	}
+	if note.ParentTaskID != parentID {
+		t.Fatalf("death_note parent_task_id = %q, want %q", note.ParentTaskID, parentID)
+	}
+	if note.FailureReason != "timeout" {
+		t.Fatalf("death_note failure_reason = %q, want timeout", note.FailureReason)
+	}
+	if !note.ResumeSafe {
+		t.Fatal("death_note should mark ordinary timeout as resume_safe")
+	}
+	if note.SessionID != "ORDINARY-TIMEOUT-SESSION" || note.WorkDir != "/tmp/ordinary-timeout" {
+		t.Fatalf("death_note resume pointers = (%q, %q)", note.SessionID, note.WorkDir)
+	}
+	if note.FilesTouchedAvailable {
+		t.Fatal("death_note should mark files_touched_available false until the daemon reports touched files")
+	}
+	if note.FilesTouched == nil || len(note.FilesTouched) != 0 {
+		t.Fatalf("death_note files_touched = %#v, want empty array", note.FilesTouched)
+	}
+	if note.Attempt != 1 || note.MaxAttempts != 2 {
+		t.Fatalf("death_note attempts = %d/%d, want 1/2", note.Attempt, note.MaxAttempts)
+	}
+	if note.ContinuationHint == "" {
+		t.Fatal("death_note missing continuation_hint")
+	}
+}
+
+func TestCreateRetryTaskDeathNoteCapturesTailsAndPoisonedFreshSession(t *testing.T) {
+	if testPool == nil {
+		t.Skip("no database connection")
+	}
+
+	issueID, agentID, runtimeID := setupRerunTestFixture(t)
+	t.Cleanup(func() { cleanupRerunFixture(t, issueID) })
+
+	ctx := context.Background()
+
+	longError := "prefix-" + strings.Repeat("x", 4100) + "-error-tail"
+	longOutput := "prefix-" + strings.Repeat("y", 4100) + "-output-tail"
+	var parentID string
+	if err := testPool.QueryRow(ctx, `
+		INSERT INTO agent_task_queue (
+			agent_id, runtime_id, issue_id, status, priority,
+			started_at, completed_at, session_id, work_dir, failure_reason,
+			error, result, attempt, max_attempts
+		)
+		VALUES ($1, $2, $3, 'failed', 0, now() - interval '1 minute', now() - interval '1 minute',
+		        'POISONED-SESSION', '/tmp/poisoned', 'codex_semantic_inactivity',
+		        $4, jsonb_build_object('comment', $5::text), 1, 2)
+		RETURNING id
+	`, agentID, runtimeID, issueID, longError, longOutput).Scan(&parentID); err != nil {
+		t.Fatalf("insert poisoned parent task: %v", err)
+	}
+
+	queries := db.New(testPool)
+	child, err := queries.CreateRetryTask(ctx, pgtype.UUID{Bytes: parseUUIDBytes(parentID), Valid: true})
+	if err != nil {
+		t.Fatalf("CreateRetryTask failed: %v", err)
+	}
+	if child.SessionID.Valid || child.WorkDir.Valid || !child.ForceFreshSession {
+		t.Fatalf("expected poisoned retry to force fresh without session/workdir, got session=%+v workdir=%+v fresh=%v", child.SessionID, child.WorkDir, child.ForceFreshSession)
+	}
+
+	var ctxPayload map[string]json.RawMessage
+	if err := json.Unmarshal(child.Context, &ctxPayload); err != nil {
+		t.Fatalf("retry child context is not JSON: %v", err)
+	}
+	var note struct {
+		FailureReason    string `json:"failure_reason"`
+		ErrorTail        string `json:"error_tail"`
+		OutputTail       string `json:"output_tail"`
+		SessionID        string `json:"session_id"`
+		WorkDir          string `json:"work_dir"`
+		ResumeSafe       bool   `json:"resume_safe"`
+		ContinuationHint string `json:"continuation_hint"`
+	}
+	if err := json.Unmarshal(ctxPayload["death_note"], &note); err != nil {
+		t.Fatalf("death_note missing or invalid: %v", err)
+	}
+	if note.FailureReason != "codex_semantic_inactivity" {
+		t.Fatalf("death_note failure_reason = %q", note.FailureReason)
+	}
+	if note.ResumeSafe {
+		t.Fatal("death_note should mark codex_semantic_inactivity as resume-unsafe")
+	}
+	if note.SessionID != "" || note.WorkDir != "" {
+		t.Fatalf("resume-unsafe death_note leaked pointers: session=%q workdir=%q", note.SessionID, note.WorkDir)
+	}
+	if !strings.HasSuffix(note.ErrorTail, "-error-tail") || len(note.ErrorTail) > 4000 {
+		t.Fatalf("error_tail was not captured as a 4000-char tail, len=%d suffix=%q", len(note.ErrorTail), tail(note.ErrorTail, 32))
+	}
+	if !strings.Contains(note.OutputTail, "-output-tail") || len(note.OutputTail) > 4000 {
+		t.Fatalf("output_tail was not captured as a 4000-char tail, len=%d suffix=%q", len(note.OutputTail), tail(note.OutputTail, 32))
+	}
+	if !strings.Contains(note.ContinuationHint, "fresh session") {
+		t.Fatalf("poisoned continuation hint does not require fresh session: %q", note.ContinuationHint)
 	}
 }
 
