@@ -56,7 +56,7 @@ export function JudgeScoreSection({ taskId, taskStatus }: JudgeScoreSectionProps
         <Sparkles className="h-3.5 w-3.5" />
         {t(($) => $.transcript.judge_score.title)}
         <span
-          className="inline-flex items-center rounded-full bg-amber-500/15 px-2 py-0.5 text-[10px] font-semibold text-amber-600 dark:text-amber-400"
+          className="inline-flex items-center rounded-full bg-amber-500/15 px-2 py-0.5 text-[10px] font-semibold text-amber-800 dark:text-amber-400"
           title={t(($) => $.transcript.judge_score.modeled_tooltip)}
         >
           {score.calibration_status}
