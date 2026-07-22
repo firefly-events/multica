@@ -93,7 +93,22 @@ func makeJudgeScoreSamplerHandler(pool *pgxpool.Pool, j judge.Judge, cfg JudgeSc
 		var scored, sampled, failed int64
 		for _, task := range candidates {
 			taskID := task.ID.String()
-			if !judge.ShouldSample(taskID, cfg.SampleRate) {
+			decision := judge.ShouldSample(taskID, cfg.SampleRate)
+
+			// Record that this task was considered regardless of the
+			// sample outcome. ListUnjudgedCompletedTasks excludes on
+			// judge_sample_decision, not judge_score, so this is what
+			// lets the candidate window advance past a task that missed
+			// the sample-rate hash instead of returning it forever.
+			if err := q.InsertJudgeSampleDecision(ctx, db.InsertJudgeSampleDecisionParams{
+				TaskID:  task.ID,
+				Sampled: decision,
+			}); err != nil {
+				failed++
+				continue
+			}
+
+			if !decision {
 				continue
 			}
 			sampled++

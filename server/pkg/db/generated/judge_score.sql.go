@@ -55,6 +55,26 @@ func (q *Queries) GetJudgeScoresByTask(ctx context.Context, taskID pgtype.UUID) 
 	return items, nil
 }
 
+const insertJudgeSampleDecision = `-- name: InsertJudgeSampleDecision :exec
+INSERT INTO judge_sample_decision (task_id, sampled)
+VALUES ($1, $2)
+ON CONFLICT (task_id) DO NOTHING
+`
+
+type InsertJudgeSampleDecisionParams struct {
+	TaskID  pgtype.UUID `json:"task_id"`
+	Sampled bool        `json:"sampled"`
+}
+
+// Records that the sampler considered task_id this tick, whether or not
+// it landed inside the sample-rate hash. Idempotent: a task is only ever
+// considered once, so a conflict here means concurrent sampler runs raced
+// on the same candidate and the loser's decision is discarded.
+func (q *Queries) InsertJudgeSampleDecision(ctx context.Context, arg InsertJudgeSampleDecisionParams) error {
+	_, err := q.db.Exec(ctx, insertJudgeSampleDecision, arg.TaskID, arg.Sampled)
+	return err
+}
+
 const insertJudgeScore = `-- name: InsertJudgeScore :one
 INSERT INTO judge_score (
     task_id, judge_provider, judge_model,
@@ -150,7 +170,7 @@ WHERE atq.status = 'completed'
   AND atq.completed_at IS NOT NULL
   AND atq.completed_at <= $1::timestamptz
   AND NOT EXISTS (
-      SELECT 1 FROM judge_score js WHERE js.task_id = atq.id
+      SELECT 1 FROM judge_sample_decision jsd WHERE jsd.task_id = atq.id
   )
 ORDER BY atq.completed_at ASC
 LIMIT $2
@@ -161,9 +181,13 @@ type ListUnjudgedCompletedTasksParams struct {
 	LimitCount int32              `json:"limit_count"`
 }
 
-// Candidate pool for the judge sampler: completed tasks not yet scored,
-// oldest-completed-first so a slow sampler still makes forward progress
-// across restarts instead of re-considering the same recent tail.
+// Candidate pool for the judge sampler: completed tasks not yet
+// *considered* by the sampler, oldest-completed-first so a slow sampler
+// still makes forward progress across restarts instead of re-considering
+// the same recent tail. Excluding on judge_sample_decision (not just
+// judge_score) is what lets the window advance past tasks that were
+// considered but missed the sample-rate hash — see
+// 122_judge_sample_decision.up.sql.
 func (q *Queries) ListUnjudgedCompletedTasks(ctx context.Context, arg ListUnjudgedCompletedTasksParams) ([]AgentTaskQueue, error) {
 	rows, err := q.db.Query(ctx, listUnjudgedCompletedTasks, arg.Before, arg.LimitCount)
 	if err != nil {

@@ -447,6 +447,12 @@ type IssueToLabel struct {
 	LabelID pgtype.UUID `json:"label_id"`
 }
 
+type JudgeSampleDecision struct {
+	TaskID    pgtype.UUID        `json:"task_id"`
+	Sampled   bool               `json:"sampled"`
+	DecidedAt pgtype.Timestamptz `json:"decided_at"`
+}
+
 type JudgeScore struct {
 	ID                  pgtype.UUID        `json:"id"`
 	TaskID              pgtype.UUID        `json:"task_id"`
