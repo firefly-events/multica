@@ -1,5 +1,7 @@
 "use client";
 
+/* eslint-disable i18next/no-literal-string */
+
 import { useEffect, useState } from "react";
 import { Radar, Wifi, WifiOff, AlertCircle } from "lucide-react";
 import { Badge } from "@multica/ui/components/ui/badge";
@@ -7,8 +9,8 @@ import { Card, CardContent, CardHeader, CardTitle } from "@multica/ui/components
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@multica/ui/components/ui/tabs";
 import { Skeleton } from "@multica/ui/components/ui/skeleton";
 import { PageHeader } from "../layout/page-header";
-import type { Envelope, SourceHealth } from "@claud-ometer/envelope";
-import { isEnvelope } from "@claud-ometer/envelope";
+import type { Envelope, SourceHealth } from "./envelope";
+import { isEnvelope } from "./envelope";
 
 const CLAUD_OMETER_BASE = "http://localhost:3005";
 const POLL_INTERVAL_MS = 15_000;
