@@ -10,6 +10,7 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/multica-ai/multica/server/internal/events"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
+	"github.com/multica-ai/multica/server/pkg/taskfailure"
 )
 
 // mockRow implements pgx.Row, returning either a scanned task or pgx.ErrNoRows.
@@ -29,6 +30,9 @@ func (r *mockRow) Scan(dest ...any) error {
 		&t.Error, &t.CreatedAt, &t.Context, &t.RuntimeID,
 		&t.SessionID, &t.WorkDir, &t.TriggerCommentID,
 		&t.ChatSessionID, &t.AutopilotRunID,
+		&t.Attempt, &t.MaxAttempts, &t.ParentTaskID, &t.FailureReason,
+		&t.TriggerSummary, &t.ForceFreshSession, &t.IsLeaderTask,
+		&t.WaitReason, &t.InitiatorUserID,
 	}
 	for i, p := range ptrs {
 		if i >= len(dest) {
@@ -48,6 +52,8 @@ func (r *mockRow) Scan(dest ...any) error {
 			*d = *(p.(*[]byte))
 		case *pgtype.Text:
 			*d = *(p.(*pgtype.Text))
+		case *bool:
+			*d = *(p.(*bool))
 		}
 	}
 	return nil
@@ -56,7 +62,8 @@ func (r *mockRow) Scan(dest ...any) error {
 // mockDBTX routes QueryRow calls: complete/fail queries return ErrNoRows,
 // getAgentTask returns the stored task.
 type mockDBTX struct {
-	task db.AgentTaskQueue
+	task  db.AgentTaskQueue
+	child *db.AgentTaskQueue
 }
 
 func (m *mockDBTX) Exec(_ context.Context, _ string, _ ...interface{}) (pgconn.CommandTag, error) {
@@ -68,6 +75,12 @@ func (m *mockDBTX) Query(_ context.Context, _ string, _ ...interface{}) (pgx.Row
 }
 
 func (m *mockDBTX) QueryRow(_ context.Context, sql string, _ ...interface{}) pgx.Row {
+	if strings.Contains(sql, "INSERT INTO agent_task_queue") {
+		if m.child == nil {
+			return &mockRow{err: pgx.ErrNoRows}
+		}
+		return &mockRow{task: m.child}
+	}
 	// CompleteAgentTask and FailAgentTask SQL contain "SET status ="
 	if strings.Contains(sql, "SET status =") {
 		return &mockRow{err: pgx.ErrNoRows}
@@ -177,6 +190,13 @@ func TestTaskFailureClassifiers(t *testing.T) {
 		{reason: "timeout", wantType: "timeout", wantResumeOK: true, wantRetry: true},
 		{reason: "codex_semantic_inactivity", wantType: "timeout", wantResumeOK: false, wantRetry: true},
 		{reason: "runtime_recovery", wantType: "runtime", wantResumeOK: true, wantRetry: true},
+		{reason: taskfailure.ReasonAgentProviderCapacityOrRateLimit.String(), wantType: "agent_error", wantResumeOK: true, wantRetry: true},
+		{reason: taskfailure.ReasonAgentProviderServerError.String(), wantType: "agent_error", wantResumeOK: true, wantRetry: true},
+		{reason: taskfailure.ReasonAgentProviderNetwork.String(), wantType: "agent_error", wantResumeOK: true, wantRetry: true},
+		{reason: taskfailure.ReasonAgentProviderQuotaLimit.String(), wantType: "agent_error", wantResumeOK: true, wantRetry: false},
+		{reason: taskfailure.ReasonAgentProviderAuthOrAccess.String(), wantType: "agent_error", wantResumeOK: true, wantRetry: false},
+		{reason: taskfailure.ReasonAgentContextOverflow.String(), wantType: "agent_error", wantResumeOK: true, wantRetry: false},
+		{reason: taskfailure.ReasonAgentProcessFailure.String(), wantType: "agent_error", wantResumeOK: true, wantRetry: false},
 		{reason: "iteration_limit", wantType: "agent_output", wantResumeOK: false, wantRetry: false},
 		{reason: "api_invalid_request", wantType: "agent_error", wantResumeOK: false, wantRetry: false},
 		{reason: "agent_error", wantType: "agent_error", wantResumeOK: true, wantRetry: false},
@@ -194,5 +214,77 @@ func TestTaskFailureClassifiers(t *testing.T) {
 				t.Fatalf("retryableReasons[%q] = %v, want %v", tc.reason, got, tc.wantRetry)
 			}
 		})
+	}
+}
+
+func TestMaybeRetryFailedTaskProviderLimitEnqueuesRetry(t *testing.T) {
+	parentID := testUUID(1)
+	childID := testUUID(2)
+	agentID := testUUID(3)
+	issueID := testUUID(4)
+
+	parent := db.AgentTaskQueue{
+		ID:             parentID,
+		AgentID:        agentID,
+		IssueID:        issueID,
+		Status:         "failed",
+		Attempt:        1,
+		MaxAttempts:    3,
+		FailureReason:  pgtype.Text{String: taskfailure.ReasonAgentProviderCapacityOrRateLimit.String(), Valid: true},
+		AutopilotRunID: pgtype.UUID{Valid: false},
+	}
+	child := parent
+	child.ID = childID
+	child.IssueID = pgtype.UUID{Valid: false}
+	child.Status = "queued"
+	child.Attempt = 2
+	child.ParentTaskID = pgtype.UUID{Bytes: parentID.Bytes, Valid: true}
+	child.RuntimeID = pgtype.UUID{Valid: false}
+
+	svc := &TaskService{
+		Queries: db.New(&mockDBTX{task: parent, child: &child}),
+		Bus:     events.New(),
+	}
+
+	got, err := svc.MaybeRetryFailedTask(context.Background(), parent)
+	if err != nil {
+		t.Fatalf("MaybeRetryFailedTask returned error: %v", err)
+	}
+	if got == nil {
+		t.Fatal("expected retry child, got nil")
+	}
+	if got.ID != childID {
+		t.Fatalf("retry child id = %v, want %v", got.ID, childID)
+	}
+	if got.Status != "queued" {
+		t.Fatalf("retry child status = %q, want queued", got.Status)
+	}
+	if got.Attempt != 2 {
+		t.Fatalf("retry child attempt = %d, want 2", got.Attempt)
+	}
+}
+
+func TestMaybeRetryFailedTaskHardFailureDoesNotRetry(t *testing.T) {
+	parent := db.AgentTaskQueue{
+		ID:             testUUID(1),
+		AgentID:        testUUID(2),
+		IssueID:        testUUID(3),
+		Status:         "failed",
+		Attempt:        1,
+		MaxAttempts:    3,
+		FailureReason:  pgtype.Text{String: taskfailure.ReasonAgentProcessFailure.String(), Valid: true},
+		AutopilotRunID: pgtype.UUID{Valid: false},
+	}
+	svc := &TaskService{
+		Queries: db.New(&mockDBTX{task: parent}),
+		Bus:     events.New(),
+	}
+
+	got, err := svc.MaybeRetryFailedTask(context.Background(), parent)
+	if err != nil {
+		t.Fatalf("MaybeRetryFailedTask returned error: %v", err)
+	}
+	if got != nil {
+		t.Fatalf("expected no retry child, got %+v", got)
 	}
 }

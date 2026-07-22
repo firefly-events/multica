@@ -38,6 +38,7 @@
     "pinned_label": "ピン留め済み",
     "workspace_group": "ワークスペース",
     "configure_group": "設定",
+    "plugins_group": "プラグイン",
     "unread_overflow": "99+"
   }
 }

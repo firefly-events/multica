@@ -1496,10 +1496,13 @@ func (s *TaskService) FailTask(ctx context.Context, taskID pgtype.UUID, errMsg, 
 // etc.) are intentionally excluded — those are real problems that the user
 // should see, not infrastructure flakiness.
 var retryableReasons = map[string]bool{
-	"runtime_offline":           true,
-	"runtime_recovery":          true,
-	"timeout":                   true,
-	"codex_semantic_inactivity": true,
+	taskfailure.ReasonRuntimeOffline.String():                   true,
+	taskfailure.ReasonRuntimeRecovery.String():                  true,
+	taskfailure.ReasonTimeout.String():                          true,
+	"codex_semantic_inactivity":                                 true,
+	taskfailure.ReasonAgentProviderCapacityOrRateLimit.String(): true,
+	taskfailure.ReasonAgentProviderServerError.String():         true,
+	taskfailure.ReasonAgentProviderNetwork.String():             true,
 }
 
 func resumeUnsafeFailureReason(reason string) bool {
