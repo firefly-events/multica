@@ -98,6 +98,7 @@ type AgentTaskQueue struct {
 	IsLeaderTask      bool               `json:"is_leader_task"`
 	WaitReason        pgtype.Text        `json:"wait_reason"`
 	InitiatorUserID   pgtype.UUID        `json:"initiator_user_id"`
+	QueuedAfter       pgtype.Timestamptz `json:"queued_after"`
 }
 
 type Attachment struct {

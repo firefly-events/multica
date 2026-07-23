@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -1439,6 +1440,16 @@ func (s *TaskService) FailTask(ctx context.Context, taskID pgtype.UUID, errMsg, 
 	// runtime_recovery). The helper itself enforces attempt < max_attempts
 	// and only triggers for issue/chat tasks.
 	retried, _ := s.MaybeRetryFailedTask(ctx, task)
+	if retried != nil &&
+		failureReason == taskfailure.ReasonAgentProviderQuotaLimit.String() &&
+		task.IssueID.Valid &&
+		retried.QueuedAfter.Valid {
+		msg := fmt.Sprintf(
+			"Provider quota exhausted; parked retry until %s.",
+			retried.QueuedAfter.Time.UTC().Format(time.RFC3339),
+		)
+		s.createAgentComment(ctx, task.IssueID, task.AgentID, msg, "system", task.TriggerCommentID)
+	}
 
 	// Skip the per-failure system comment when we'll immediately retry —
 	// the new task will surface its own status to the user, and we don't
@@ -1500,7 +1511,10 @@ var retryableReasons = map[string]bool{
 	"runtime_recovery":          true,
 	"timeout":                   true,
 	"codex_semantic_inactivity": true,
+	taskfailure.ReasonAgentProviderQuotaLimit.String(): true,
 }
+
+const defaultProviderQuotaBackoff = time.Hour
 
 func resumeUnsafeFailureReason(reason string) bool {
 	switch reason {
@@ -1550,7 +1564,19 @@ func (s *TaskService) MaybeRetryFailedTask(ctx context.Context, parent db.AgentT
 		return nil, nil
 	}
 
-	child, err := s.Queries.CreateRetryTask(ctx, parent.ID)
+	var retryAfter pgtype.Timestamptz
+	var waitReason pgtype.Text
+	if reason == taskfailure.ReasonAgentProviderQuotaLimit.String() {
+		resetAt := providerQuotaResetAt(parent.Error.String, time.Now())
+		retryAfter = pgtype.Timestamptz{Time: resetAt, Valid: true}
+		waitReason = pgtype.Text{String: fmt.Sprintf("provider quota exhausted; retry after %s", resetAt.UTC().Format(time.RFC3339)), Valid: true}
+	}
+
+	child, err := s.Queries.CreateRetryTask(ctx, db.CreateRetryTaskParams{
+		ID:          parent.ID,
+		WaitReason:  waitReason,
+		QueuedAfter: retryAfter,
+	})
 	if err != nil {
 		slog.Warn("task auto-retry failed",
 			"parent_task_id", util.UUIDToString(parent.ID),
@@ -1565,6 +1591,7 @@ func (s *TaskService) MaybeRetryFailedTask(ctx context.Context, parent db.AgentT
 		"reason", reason,
 		"attempt", child.Attempt,
 		"max_attempts", child.MaxAttempts,
+		"queued_after", child.QueuedAfter.Time,
 	)
 	// Retry creates a fresh queued row, same status transition (∅ → queued)
 	// as EnqueueTaskFor*. Broadcast queued first, then notify the daemon —
@@ -1572,6 +1599,66 @@ func (s *TaskService) MaybeRetryFailedTask(ctx context.Context, parent db.AgentT
 	s.broadcastTaskEvent(ctx, protocol.EventTaskQueued, child)
 	s.NotifyTaskEnqueued(ctx, child)
 	return &child, nil
+}
+
+func providerQuotaResetAt(rawError string, now time.Time) time.Time {
+	if resetAt, ok := parseProviderQuotaResetAt(rawError, now); ok && resetAt.After(now) {
+		return resetAt
+	}
+	return now.Add(defaultProviderQuotaBackoff)
+}
+
+var (
+	providerQuotaTimestampRe = regexp.MustCompile(`(?i)(?:reset(?:s)?(?:\s+at)?|retry(?:\s+after|\s+at)|try\s+again\s+at)[:=\s]+([0-9]{4}-[0-9]{2}-[0-9]{2}[T ][0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]+)?(?:Z|[+-][0-9]{2}:?[0-9]{2})?)`)
+	providerQuotaDurationRe  = regexp.MustCompile(`(?i)(?:retry\s+after|try\s+again\s+in|reset(?:s)?\s+in)[:=\s]+([0-9]+)\s*(second|seconds|sec|secs|s|minute|minutes|min|mins|m|hour|hours|hr|hrs|h)`)
+)
+
+func parseProviderQuotaResetAt(rawError string, now time.Time) (time.Time, bool) {
+	trimmed := strings.TrimSpace(rawError)
+	if trimmed == "" {
+		return time.Time{}, false
+	}
+	if match := providerQuotaTimestampRe.FindStringSubmatch(trimmed); len(match) == 2 {
+		if resetAt, ok := parseProviderQuotaTimestamp(match[1], now); ok {
+			return resetAt, true
+		}
+	}
+	if match := providerQuotaDurationRe.FindStringSubmatch(trimmed); len(match) == 3 {
+		n, err := strconv.Atoi(match[1])
+		if err == nil && n > 0 {
+			return now.Add(time.Duration(n) * providerQuotaUnit(match[2])), true
+		}
+	}
+	return time.Time{}, false
+}
+
+func parseProviderQuotaTimestamp(raw string, now time.Time) (time.Time, bool) {
+	candidates := []string{raw}
+	if strings.Contains(raw, " ") {
+		candidates = append(candidates, strings.Replace(raw, " ", "T", 1))
+	}
+	for _, candidate := range candidates {
+		for _, layout := range []string{time.RFC3339Nano, "2006-01-02T15:04:05-0700"} {
+			if t, err := time.Parse(layout, candidate); err == nil {
+				return t, true
+			}
+		}
+	}
+	if t, err := time.ParseInLocation("2006-01-02 15:04:05", raw, now.Location()); err == nil {
+		return t, true
+	}
+	return time.Time{}, false
+}
+
+func providerQuotaUnit(unit string) time.Duration {
+	switch strings.ToLower(unit) {
+	case "second", "seconds", "sec", "secs", "s":
+		return time.Second
+	case "minute", "minutes", "min", "mins", "m":
+		return time.Minute
+	default:
+		return time.Hour
+	}
 }
 
 // RerunIssue creates a fresh queued task for an agent on the issue. Used by

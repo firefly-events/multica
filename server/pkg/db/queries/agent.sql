@@ -179,7 +179,8 @@ INSERT INTO agent_task_queue (
     agent_id, runtime_id, issue_id, chat_session_id, autopilot_run_id,
     status, priority, trigger_comment_id, trigger_summary, context,
     session_id, work_dir,
-    attempt, max_attempts, parent_task_id, force_fresh_session, is_leader_task
+    attempt, max_attempts, parent_task_id, force_fresh_session, is_leader_task,
+    wait_reason, queued_after
 )
 SELECT
     p.agent_id, p.runtime_id, p.issue_id, p.chat_session_id, p.autopilot_run_id,
@@ -188,7 +189,9 @@ SELECT
     CASE WHEN p.failure_reason IS NOT DISTINCT FROM 'codex_semantic_inactivity' THEN NULL ELSE p.work_dir END,
     p.attempt + 1, p.max_attempts, p.id,
     p.failure_reason IS NOT DISTINCT FROM 'codex_semantic_inactivity',
-    p.is_leader_task
+    p.is_leader_task,
+    sqlc.narg('wait_reason'),
+    sqlc.narg('queued_after')
 FROM agent_task_queue p
 WHERE p.id = $1
 RETURNING *;
@@ -278,6 +281,7 @@ SET status = 'dispatched', dispatched_at = now()
 WHERE id = (
     SELECT atq.id FROM agent_task_queue atq
     WHERE atq.agent_id = $1 AND atq.status = 'queued'
+      AND (atq.queued_after IS NULL OR atq.queued_after <= now())
       AND NOT EXISTS (
           SELECT 1 FROM agent_task_queue active
           WHERE active.agent_id = atq.agent_id
@@ -575,6 +579,7 @@ ORDER BY priority DESC, created_at ASC;
 -- idx_agent_task_queue_claim_candidates so the warm path is cheap.
 SELECT * FROM agent_task_queue
 WHERE runtime_id = $1 AND status = 'queued'
+  AND (queued_after IS NULL OR queued_after <= now())
 ORDER BY priority DESC, created_at ASC;
 
 -- name: ListActiveTasksByIssue :many

@@ -2,14 +2,17 @@ package service
 
 import (
 	"context"
+	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/multica-ai/multica/server/internal/events"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
+	"github.com/multica-ai/multica/server/pkg/taskfailure"
 )
 
 // mockRow implements pgx.Row, returning either a scanned task or pgx.ErrNoRows.
@@ -179,6 +182,8 @@ func TestTaskFailureClassifiers(t *testing.T) {
 		{reason: "runtime_recovery", wantType: "runtime", wantResumeOK: true, wantRetry: true},
 		{reason: "iteration_limit", wantType: "agent_output", wantResumeOK: false, wantRetry: false},
 		{reason: "api_invalid_request", wantType: "agent_error", wantResumeOK: false, wantRetry: false},
+		{reason: taskfailure.ReasonAgentProviderQuotaLimit.String(), wantType: "agent_error", wantResumeOK: true, wantRetry: true},
+		{reason: taskfailure.ReasonAgentProviderCapacityOrRateLimit.String(), wantType: "agent_error", wantResumeOK: true, wantRetry: false},
 		{reason: "agent_error", wantType: "agent_error", wantResumeOK: true, wantRetry: false},
 	}
 
@@ -194,5 +199,60 @@ func TestTaskFailureClassifiers(t *testing.T) {
 				t.Fatalf("retryableReasons[%q] = %v, want %v", tc.reason, got, tc.wantRetry)
 			}
 		})
+	}
+}
+
+func TestProviderQuotaResetAt(t *testing.T) {
+	now := time.Date(2026, 7, 22, 10, 0, 0, 0, time.UTC)
+
+	tests := []struct {
+		name string
+		err  string
+		want time.Time
+	}{
+		{
+			name: "absolute reset window",
+			err:  "provider quota exceeded; resets at 2026-07-22T11:30:00Z",
+			want: time.Date(2026, 7, 22, 11, 30, 0, 0, time.UTC),
+		},
+		{
+			name: "retry after duration",
+			err:  "insufficient quota; retry after 45 minutes",
+			want: now.Add(45 * time.Minute),
+		},
+		{
+			name: "missing reset hint defaults conservatively",
+			err:  "monthly usage limit reached",
+			want: now.Add(defaultProviderQuotaBackoff),
+		},
+		{
+			name: "past reset hint defaults to future backoff",
+			err:  "quota exceeded; resets at 2026-07-22T09:30:00Z",
+			want: now.Add(defaultProviderQuotaBackoff),
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := providerQuotaResetAt(tc.err, now); !got.Equal(tc.want) {
+				t.Fatalf("providerQuotaResetAt() = %s, want %s", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestClaimQueriesExcludeParkedQueuedTasksUntilRelease(t *testing.T) {
+	sqlBytes, err := os.ReadFile("../../pkg/db/queries/agent.sql")
+	if err != nil {
+		t.Fatalf("read agent.sql: %v", err)
+	}
+	sql := string(sqlBytes)
+	want := "(queued_after IS NULL OR queued_after <= now())"
+	if count := strings.Count(sql, want); count != 1 {
+		t.Fatalf("ListQueuedClaimCandidatesByRuntime queued_after guard count = %d, want 1", count)
+	}
+	wantClaim := "(atq.queued_after IS NULL OR atq.queued_after <= now())"
+	if count := strings.Count(sql, wantClaim); count != 1 {
+		t.Fatalf("ClaimAgentTask queued_after guard count = %d, want 1", count)
 	}
 }
