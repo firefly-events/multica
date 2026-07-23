@@ -18,6 +18,7 @@ import (
 	"github.com/multica-ai/multica/server/internal/auth"
 	"github.com/multica-ai/multica/server/internal/daemonws"
 	"github.com/multica-ai/multica/server/internal/middleware"
+	"github.com/multica-ai/multica/server/internal/service"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 	"github.com/multica-ai/multica/server/pkg/protocol"
 )
@@ -165,6 +166,29 @@ func createDispatchedClaimFixtureTask(t *testing.T, ctx context.Context, agentID
 	return taskID
 }
 
+func createQueuedClaimFixtureTask(t *testing.T, ctx context.Context, agentID, runtimeID, issueID string, priority int) string {
+	t.Helper()
+
+	var taskID string
+	if err := testPool.QueryRow(ctx, `
+		INSERT INTO agent_task_queue (agent_id, runtime_id, issue_id, status, priority)
+		VALUES ($1, $2, $3, 'queued', $4)
+		RETURNING id
+	`, agentID, runtimeID, issueID, priority).Scan(&taskID); err != nil {
+		t.Fatalf("setup: create queued task: %v", err)
+	}
+	t.Cleanup(func() { testPool.Exec(ctx, `DELETE FROM agent_task_queue WHERE id = $1`, taskID) })
+
+	return taskID
+}
+
+func withHybridClaimMode(t *testing.T) {
+	t.Helper()
+	prior := testHandler.TaskService.HybridOrchestrator
+	testHandler.TaskService.HybridOrchestrator = true
+	t.Cleanup(func() { testHandler.TaskService.HybridOrchestrator = prior })
+}
+
 func claimTaskByRuntimeForTest(t *testing.T, runtimeID string) (*struct {
 	ID string `json:"id"`
 }, string) {
@@ -189,6 +213,167 @@ func claimTaskByRuntimeForTest(t *testing.T, runtimeID string) (*struct {
 		t.Fatalf("decode claim response: %v", err)
 	}
 	return resp.Task, w.Body.String()
+}
+
+func TestClaimTaskByRuntime_HybridDoesNotPopQueuedTask(t *testing.T) {
+	if testHandler == nil || testPool == nil {
+		t.Skip("database not available")
+	}
+	withHybridClaimMode(t)
+
+	ctx := context.Background()
+	runtimeID := createClaimReclaimRuntime(t, ctx, "Hybrid inbox queued runtime")
+	agentID, issueID := createClaimReclaimAgentAndIssue(t, ctx, runtimeID, "Hybrid inbox queued agent")
+	taskID := createQueuedClaimFixtureTask(t, ctx, agentID, runtimeID, issueID, 5)
+
+	task, body := claimTaskByRuntimeForTest(t, runtimeID)
+	if task != nil {
+		t.Fatalf("hybrid claim must not pop queued task %s directly, got %s in %s", taskID, task.ID, body)
+	}
+
+	var status string
+	if err := testPool.QueryRow(ctx, `SELECT status FROM agent_task_queue WHERE id = $1`, taskID).Scan(&status); err != nil {
+		t.Fatalf("load queued task: %v", err)
+	}
+	if status != "queued" {
+		t.Fatalf("queued task status = %s, want queued", status)
+	}
+}
+
+func TestHybridDispatcher_DispatchesWithinBoundedPoolAndClaimInbox(t *testing.T) {
+	if testHandler == nil || testPool == nil {
+		t.Skip("database not available")
+	}
+	withHybridClaimMode(t)
+
+	ctx := context.Background()
+	runtimeID := createClaimReclaimRuntime(t, ctx, "Hybrid dispatch pool runtime")
+	agentID, issueID := createClaimReclaimAgentAndIssue(t, ctx, runtimeID, "Hybrid dispatch pool agent")
+	firstTaskID := createQueuedClaimFixtureTask(t, ctx, agentID, runtimeID, issueID, 10)
+	_, secondIssueID := createClaimReclaimAgentAndIssue(t, ctx, runtimeID, "Hybrid dispatch pool second issue")
+	secondTaskID := createQueuedClaimFixtureTask(t, ctx, agentID, runtimeID, secondIssueID, 1)
+
+	result, err := testHandler.TaskService.RunHybridDispatchTick(ctx, service.HybridDispatchConfig{
+		PoolLimit:  1,
+		BatchLimit: 10,
+		StaleTTL:   time.Minute,
+	})
+	if err != nil {
+		t.Fatalf("RunHybridDispatchTick: %v", err)
+	}
+	if !result.LeaseAcquired {
+		t.Fatal("expected dispatcher lease")
+	}
+	if len(result.Dispatched) != 1 {
+		t.Fatalf("dispatched count = %d, want 1", len(result.Dispatched))
+	}
+	if got := uuidToString(result.Dispatched[0].ID); got != firstTaskID {
+		t.Fatalf("dispatched task = %s, want %s", got, firstTaskID)
+	}
+
+	task, body := claimTaskByRuntimeForTest(t, runtimeID)
+	if task == nil || task.ID != firstTaskID {
+		t.Fatalf("hybrid inbox claim = %#v in %s, want task %s", task, body, firstTaskID)
+	}
+
+	var secondStatus string
+	if err := testPool.QueryRow(ctx, `SELECT status FROM agent_task_queue WHERE id = $1`, secondTaskID).Scan(&secondStatus); err != nil {
+		t.Fatalf("load second task: %v", err)
+	}
+	if secondStatus != "queued" {
+		t.Fatalf("second task status = %s, want queued while pool is full", secondStatus)
+	}
+}
+
+func TestHybridDispatcher_ReapsStaleDispatchedWithoutRetryDuplicate(t *testing.T) {
+	if testHandler == nil || testPool == nil {
+		t.Skip("database not available")
+	}
+
+	ctx := context.Background()
+	runtimeID := createClaimReclaimRuntime(t, ctx, "Hybrid stale reap runtime")
+	agentID, issueID := createClaimReclaimAgentAndIssue(t, ctx, runtimeID, "Hybrid stale reap agent")
+	taskID := createDispatchedClaimFixtureTask(t, ctx, agentID, runtimeID, issueID, "10 minutes", false)
+
+	if _, err := testPool.Exec(ctx, `UPDATE agent_runtime SET status = 'offline' WHERE id = $1`, runtimeID); err != nil {
+		t.Fatalf("mark runtime offline: %v", err)
+	}
+
+	result, err := testHandler.TaskService.RunHybridDispatchTick(ctx, service.HybridDispatchConfig{
+		PoolLimit:  5,
+		BatchLimit: 5,
+		StaleTTL:   time.Minute,
+	})
+	if err != nil {
+		t.Fatalf("RunHybridDispatchTick: %v", err)
+	}
+	if len(result.Reaped) != 1 || uuidToString(result.Reaped[0].ID) != taskID {
+		t.Fatalf("reaped = %#v, want task %s", result.Reaped, taskID)
+	}
+	if len(result.Dispatched) != 0 {
+		t.Fatalf("offline runtime should not be redispatched, got %d", len(result.Dispatched))
+	}
+
+	var status string
+	var retryCount int
+	if err := testPool.QueryRow(ctx, `SELECT status FROM agent_task_queue WHERE id = $1`, taskID).Scan(&status); err != nil {
+		t.Fatalf("load reaped task: %v", err)
+	}
+	if err := testPool.QueryRow(ctx, `SELECT count(*) FROM agent_task_queue WHERE parent_task_id = $1`, taskID).Scan(&retryCount); err != nil {
+		t.Fatalf("count retry tasks: %v", err)
+	}
+	if status != "queued" {
+		t.Fatalf("reaped task status = %s, want queued", status)
+	}
+	if retryCount != 0 {
+		t.Fatalf("reap created %d retry tasks, want 0", retryCount)
+	}
+}
+
+func TestHybridDispatcher_CircuitBreakerSkipsFastFailPair(t *testing.T) {
+	if testHandler == nil || testPool == nil {
+		t.Skip("database not available")
+	}
+
+	ctx := context.Background()
+	runtimeID := createClaimReclaimRuntime(t, ctx, "Hybrid circuit runtime")
+	agentID, issueID := createClaimReclaimAgentAndIssue(t, ctx, runtimeID, "Hybrid circuit agent")
+	blockedTaskID := createQueuedClaimFixtureTask(t, ctx, agentID, runtimeID, issueID, 10)
+	for i := 0; i < 3; i++ {
+		var failedID string
+		if err := testPool.QueryRow(ctx, `
+			INSERT INTO agent_task_queue (
+				agent_id, runtime_id, issue_id, status, priority, completed_at, failure_reason
+			)
+			VALUES ($1, $2, $3, 'failed', 0, now() - interval '30 seconds', 'runtime_recovery')
+			RETURNING id
+		`, agentID, runtimeID, issueID).Scan(&failedID); err != nil {
+			t.Fatalf("setup failed task: %v", err)
+		}
+		t.Cleanup(func() { testPool.Exec(ctx, `DELETE FROM agent_task_queue WHERE id = $1`, failedID) })
+	}
+
+	result, err := testHandler.TaskService.RunHybridDispatchTick(ctx, service.HybridDispatchConfig{
+		PoolLimit:       5,
+		BatchLimit:      5,
+		StaleTTL:        time.Minute,
+		CircuitWindow:   time.Minute,
+		MaxFastFailures: 3,
+	})
+	if err != nil {
+		t.Fatalf("RunHybridDispatchTick: %v", err)
+	}
+	if len(result.Dispatched) != 0 {
+		t.Fatalf("circuit-broken pair dispatched %d tasks, want 0", len(result.Dispatched))
+	}
+
+	var status string
+	if err := testPool.QueryRow(ctx, `SELECT status FROM agent_task_queue WHERE id = $1`, blockedTaskID).Scan(&status); err != nil {
+		t.Fatalf("load circuit-blocked task: %v", err)
+	}
+	if status != "queued" {
+		t.Fatalf("circuit-blocked task status = %s, want queued", status)
+	}
 }
 
 func TestClaimTaskByRuntime_ReclaimsStaleDispatchedTask(t *testing.T) {

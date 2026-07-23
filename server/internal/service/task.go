@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -39,6 +40,9 @@ type TaskService struct {
 	// goes through the DB. Wired in router.go from the shared Redis
 	// client.
 	EmptyClaim *EmptyClaimCache
+	// HybridOrchestrator moves queued->dispatched ownership into the server
+	// dispatcher. Daemon claims become inbox pulls from already-dispatched rows.
+	HybridOrchestrator bool
 
 	analyticsContextMu    sync.Mutex
 	analyticsContextCache map[string]analytics.TaskContext
@@ -85,7 +89,13 @@ const (
 	// claimResponseRecoveryWindow must exceed daemon client.Timeout for
 	// /tasks/claim (30s) plus /tasks/{id}/start (30s) plus scheduling slack, so
 	// an in-flight StartTask cannot be reclaimed and double-dispatched.
-	claimResponseRecoveryWindow = 90 * time.Second
+	claimResponseRecoveryWindow    = 90 * time.Second
+	HybridDispatchDefaultPoolLimit = 32
+	HybridDispatchDefaultBatchSize = 32
+	HybridDispatchReapBatchSize    = 128
+	HybridDispatchStaleTTL         = 5 * time.Minute
+	HybridCircuitWindow            = 10 * time.Minute
+	HybridCircuitMaxFastFailures   = 3
 )
 
 // buildCommentTriggerSummary fetches the comment content and truncates
@@ -112,7 +122,11 @@ func NewTaskService(q *db.Queries, tx TxStarter, hub *realtime.Hub, bus *events.
 	if len(wakeups) > 0 {
 		wakeup = wakeups[0]
 	}
-	return &TaskService{Queries: q, TxStarter: tx, Hub: hub, Bus: bus, Wakeup: wakeup}
+	return &TaskService{Queries: q, TxStarter: tx, Hub: hub, Bus: bus, Wakeup: wakeup, HybridOrchestrator: HybridOrchestratorEnabled()}
+}
+
+func HybridOrchestratorEnabled() bool {
+	return strings.EqualFold(strings.TrimSpace(os.Getenv("MULTICA_HYBRID_ORCHESTRATOR")), "true")
 }
 
 var trivialDoneMarkers = []string{
@@ -996,6 +1010,22 @@ func (s *TaskService) ClaimTask(ctx context.Context, agentID pgtype.UUID) (*db.A
 // every enqueue (notifyTaskAvailable), so a queued task becomes
 // claimable on the next call rather than waiting for the TTL.
 func (s *TaskService) ClaimTaskForRuntime(ctx context.Context, runtimeID pgtype.UUID) (*db.AgentTaskQueue, error) {
+	if s.HybridOrchestrator {
+		task, err := s.Queries.ClaimHybridDispatchedTaskForRuntime(ctx, runtimeID)
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return nil, nil
+			}
+			return nil, fmt.Errorf("claim hybrid dispatched task: %w", err)
+		}
+		slog.Info("hybrid task inbox claimed",
+			"task_id", util.UUIDToString(task.ID),
+			"runtime_id", util.UUIDToString(runtimeID),
+			"agent_id", util.UUIDToString(task.AgentID),
+		)
+		return &task, nil
+	}
+
 	start := time.Now()
 	var (
 		outcome          = "no_task"
@@ -1099,6 +1129,102 @@ func (s *TaskService) ClaimTaskForRuntime(ctx context.Context, runtimeID pgtype.
 	}
 
 	return claimed, nil
+}
+
+type HybridDispatchConfig struct {
+	PoolLimit         int
+	BatchLimit        int
+	StaleTTL          time.Duration
+	CircuitWindow     time.Duration
+	MaxFastFailures   int
+	ClearStartupLocks bool
+}
+
+func (cfg HybridDispatchConfig) normalize() HybridDispatchConfig {
+	if cfg.PoolLimit <= 0 {
+		cfg.PoolLimit = HybridDispatchDefaultPoolLimit
+	}
+	if cfg.BatchLimit <= 0 {
+		cfg.BatchLimit = HybridDispatchDefaultBatchSize
+	}
+	if cfg.StaleTTL <= 0 {
+		cfg.StaleTTL = HybridDispatchStaleTTL
+	}
+	if cfg.CircuitWindow <= 0 {
+		cfg.CircuitWindow = HybridCircuitWindow
+	}
+	if cfg.MaxFastFailures <= 0 {
+		cfg.MaxFastFailures = HybridCircuitMaxFastFailures
+	}
+	return cfg
+}
+
+type HybridDispatchResult struct {
+	LeaseAcquired  bool
+	StartupCleared []db.AgentTaskQueue
+	Reaped         []db.AgentTaskQueue
+	Dispatched     []db.AgentTaskQueue
+}
+
+func (s *TaskService) RunHybridDispatchTick(ctx context.Context, cfg HybridDispatchConfig) (HybridDispatchResult, error) {
+	cfg = cfg.normalize()
+	var result HybridDispatchResult
+	err := s.runInTx(ctx, func(q *db.Queries) error {
+		acquired, err := q.TryHybridDispatcherLease(ctx)
+		if err != nil {
+			return fmt.Errorf("try hybrid dispatcher lease: %w", err)
+		}
+		result.LeaseAcquired = acquired
+		if !acquired {
+			return nil
+		}
+		if cfg.ClearStartupLocks {
+			cleared, err := q.ClearHybridStartupDispatchedTasks(ctx)
+			if err != nil {
+				return fmt.Errorf("clear hybrid startup dispatched tasks: %w", err)
+			}
+			result.StartupCleared = cleared
+		}
+		reaped, err := q.ReapHybridStaleDispatchedTasks(ctx, db.ReapHybridStaleDispatchedTasksParams{
+			TtlSecs:    cfg.StaleTTL.Seconds(),
+			MaxPerTick: HybridDispatchReapBatchSize,
+		})
+		if err != nil {
+			return fmt.Errorf("reap hybrid stale dispatched tasks: %w", err)
+		}
+		result.Reaped = reaped
+		dispatched, err := q.DispatchHybridTasks(ctx, db.DispatchHybridTasksParams{
+			PoolLimit:         int32(cfg.PoolLimit),
+			CircuitWindowSecs: cfg.CircuitWindow.Seconds(),
+			MaxFastFailures:   int32(cfg.MaxFastFailures),
+			BatchLimit:        int32(cfg.BatchLimit),
+		})
+		if err != nil {
+			return fmt.Errorf("dispatch hybrid tasks: %w", err)
+		}
+		result.Dispatched = dispatched
+		return nil
+	})
+	if err != nil {
+		return result, err
+	}
+	if result.LeaseAcquired {
+		for _, task := range result.StartupCleared {
+			s.broadcastTaskEvent(ctx, protocol.EventTaskQueued, task)
+		}
+		for _, task := range result.Reaped {
+			s.broadcastTaskEvent(ctx, protocol.EventTaskQueued, task)
+		}
+		for _, task := range result.Dispatched {
+			s.captureTaskDispatched(ctx, task)
+			s.ReconcileAgentStatus(ctx, task.AgentID)
+			s.broadcastTaskDispatch(ctx, task)
+			if s.Wakeup != nil && task.RuntimeID.Valid {
+				s.Wakeup.NotifyTaskAvailable(util.UUIDToString(task.RuntimeID), util.UUIDToString(task.ID))
+			}
+		}
+	}
+	return result, nil
 }
 
 // maybeLogClaimSlow emits one structured log per ClaimTask call when its total

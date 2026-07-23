@@ -321,6 +321,129 @@ WHERE id = (
 )
 RETURNING *;
 
+-- name: TryHybridDispatcherLease :one
+-- Transaction-scoped DB lease for the hybrid dispatcher. The caller must run
+-- this inside a transaction and do all dispatch mutations before commit.
+SELECT pg_try_advisory_xact_lock(hashtext('multica_hybrid_orchestrator_dispatcher')) AS acquired;
+
+-- name: ClearHybridStartupDispatchedTasks :many
+-- When the hybrid dispatcher gains leadership, clear handoff locks left in
+-- dispatched-but-not-started. Running tasks are intentionally left to orphan
+-- recovery because they may still have active telemetry.
+UPDATE agent_task_queue
+SET status = 'queued', dispatched_at = NULL
+WHERE status = 'dispatched'
+  AND started_at IS NULL
+RETURNING *;
+
+-- name: ReapHybridStaleDispatchedTasks :many
+-- Return assignments that never reached StartTask to the queue. This is a
+-- reclaim, not a terminal failure: the dispatcher can hand the work out again
+-- without creating duplicate retry rows.
+WITH victims AS (
+    SELECT id FROM agent_task_queue
+    WHERE status = 'dispatched'
+      AND started_at IS NULL
+      AND dispatched_at < now() - make_interval(secs => @ttl_secs::double precision)
+    ORDER BY dispatched_at ASC
+    LIMIT @max_per_tick::int
+    FOR UPDATE SKIP LOCKED
+)
+UPDATE agent_task_queue t
+SET status = 'queued',
+    dispatched_at = NULL
+FROM victims v
+WHERE t.id = v.id
+RETURNING t.*;
+
+-- name: ClaimHybridDispatchedTaskForRuntime :one
+-- Hybrid daemons pull only from their already-assigned inbox. The dispatcher
+-- owns queued->dispatched selection; this endpoint only redelivers an
+-- assignment that has not reached StartTask.
+UPDATE agent_task_queue
+SET dispatched_at = now()
+WHERE id = (
+    SELECT id FROM agent_task_queue
+    WHERE runtime_id = $1
+      AND status = 'dispatched'
+      AND started_at IS NULL
+    ORDER BY priority DESC, dispatched_at ASC
+    LIMIT 1
+    FOR UPDATE SKIP LOCKED
+)
+RETURNING *;
+
+-- name: DispatchHybridTasks :many
+-- Single-writer dispatcher: move queued tasks into assigned dispatched inboxes
+-- while enforcing a global pool limit, per-agent capacity, same issue/agent
+-- serialization, online runtime admission, and a fast-fail circuit breaker
+-- for task/agent/runtime pairs that have crashed repeatedly in the cooldown
+-- window. The surrounding transaction must hold TryHybridDispatcherLease.
+WITH capacity AS (
+    SELECT GREATEST(
+        @pool_limit::int - (
+            SELECT count(*)::int
+            FROM agent_task_queue
+            WHERE status IN ('dispatched', 'running', 'waiting_local_directory')
+        ),
+        0
+    ) AS slots
+),
+victims AS (
+    SELECT atq.id
+    FROM agent_task_queue atq
+    JOIN agent a ON a.id = atq.agent_id
+    JOIN agent_runtime ar ON ar.id = atq.runtime_id
+    CROSS JOIN capacity c
+    WHERE c.slots > 0
+      AND atq.status = 'queued'
+      AND ar.status = 'online'
+      AND (
+          SELECT count(*)::int
+          FROM agent_task_queue active
+          WHERE active.agent_id = atq.agent_id
+            AND active.status IN ('dispatched', 'running', 'waiting_local_directory')
+      ) < a.max_concurrent_tasks
+      AND NOT EXISTS (
+          SELECT 1 FROM agent_task_queue active
+          WHERE active.agent_id = atq.agent_id
+            AND active.status IN ('dispatched', 'running', 'waiting_local_directory')
+            AND (
+              (atq.issue_id IS NOT NULL AND active.issue_id = atq.issue_id)
+              OR (atq.chat_session_id IS NOT NULL AND active.chat_session_id = atq.chat_session_id)
+              OR (
+                atq.issue_id IS NULL
+                AND atq.chat_session_id IS NULL
+                AND atq.autopilot_run_id IS NULL
+                AND active.issue_id IS NULL
+                AND active.chat_session_id IS NULL
+                AND active.autopilot_run_id IS NULL
+              )
+            )
+      )
+      AND NOT EXISTS (
+          SELECT 1
+          FROM agent_task_queue failed
+          WHERE failed.agent_id = atq.agent_id
+            AND failed.runtime_id = atq.runtime_id
+            AND failed.issue_id IS NOT DISTINCT FROM atq.issue_id
+            AND failed.status = 'failed'
+            AND failed.completed_at > now() - make_interval(secs => @circuit_window_secs::double precision)
+            AND COALESCE(failed.failure_reason, '') IN ('runtime_recovery', 'timeout', 'agent_error')
+          GROUP BY failed.agent_id, failed.runtime_id, failed.issue_id
+          HAVING count(*) >= @max_fast_failures::int
+      )
+    ORDER BY atq.priority DESC, atq.created_at ASC
+    LIMIT LEAST(@batch_limit::int, (SELECT slots FROM capacity))
+    FOR UPDATE SKIP LOCKED
+)
+UPDATE agent_task_queue t
+SET status = 'dispatched',
+    dispatched_at = now()
+FROM victims v
+WHERE t.id = v.id
+RETURNING t.*;
+
 -- name: StartAgentTask :one
 -- Transitions a task to running. Accepts either 'dispatched' (the normal
 -- claim → run flow) or 'waiting_local_directory' (the daemon held the row in
