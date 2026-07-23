@@ -161,6 +161,7 @@ func init() {
 	agentCreateCmd.Flags().String("instructions", "", "Agent instructions")
 	agentCreateCmd.Flags().String("runtime-id", "", "Runtime ID (required)")
 	agentCreateCmd.Flags().String("runtime-config", "", "Runtime config as JSON string")
+	agentCreateCmd.Flags().String("autonomy-mode", "", "Runtime autonomy mode: supervised or full-access. Stored in runtime_config.autonomy_mode.")
 	agentCreateCmd.Flags().String("model", "", "Model identifier (e.g. claude-sonnet-4-6, openai/gpt-4o). Prefer this over passing --model in --custom-args.")
 	agentCreateCmd.Flags().String("custom-args", "", "Custom CLI arguments as JSON array. For model selection prefer --model; some providers (codex app-server, openclaw) reject --model in custom_args.")
 	agentCreateCmd.Flags().String("custom-env", "", "Custom environment variables as JSON object, e.g. '{\"KEY\":\"value\"}'. Treated as secret material — never logged by the CLI, but values passed on the command line are visible to shell history and 'ps'; prefer --custom-env-stdin or --custom-env-file for real secrets. Pass '{}' to set an empty map.")
@@ -179,6 +180,7 @@ func init() {
 	agentUpdateCmd.Flags().String("instructions", "", "New instructions")
 	agentUpdateCmd.Flags().String("runtime-id", "", "New runtime ID")
 	agentUpdateCmd.Flags().String("runtime-config", "", "New runtime config as JSON string")
+	agentUpdateCmd.Flags().String("autonomy-mode", "", "Runtime autonomy mode: supervised or full-access. Stored in runtime_config.autonomy_mode.")
 	agentUpdateCmd.Flags().String("model", "", "New model identifier. Pass an empty string to clear and fall back to the runtime default.")
 	agentUpdateCmd.Flags().String("custom-args", "", "New custom CLI arguments as JSON array. For model selection prefer --model; some providers (codex app-server, openclaw) reject --model in custom_args.")
 	// custom_env is intentionally NOT part of `agent update`. Use
@@ -436,12 +438,9 @@ func runAgentCreate(cmd *cobra.Command, _ []string) error {
 	if v, _ := cmd.Flags().GetString("instructions"); v != "" {
 		body["instructions"] = v
 	}
-	if cmd.Flags().Changed("runtime-config") {
-		v, _ := cmd.Flags().GetString("runtime-config")
-		var rc any
-		if err := json.Unmarshal([]byte(v), &rc); err != nil {
-			return fmt.Errorf("--runtime-config must be valid JSON: %w", err)
-		}
+	if rc, ok, err := resolveRuntimeConfig(cmd); err != nil {
+		return err
+	} else if ok {
 		body["runtime_config"] = rc
 	}
 	if cmd.Flags().Changed("custom-args") {
@@ -515,12 +514,9 @@ func runAgentUpdate(cmd *cobra.Command, args []string) error {
 		v, _ := cmd.Flags().GetString("runtime-id")
 		body["runtime_id"] = v
 	}
-	if cmd.Flags().Changed("runtime-config") {
-		v, _ := cmd.Flags().GetString("runtime-config")
-		var rc any
-		if err := json.Unmarshal([]byte(v), &rc); err != nil {
-			return fmt.Errorf("--runtime-config must be valid JSON: %w", err)
-		}
+	if rc, ok, err := resolveRuntimeConfig(cmd); err != nil {
+		return err
+	} else if ok {
 		body["runtime_config"] = rc
 	}
 	if cmd.Flags().Changed("custom-args") {
@@ -980,6 +976,37 @@ func parseCustomArgs(raw string) ([]string, error) {
 		return nil, fmt.Errorf("--custom-args must be a valid JSON array of strings")
 	}
 	return ca, nil
+}
+
+func resolveRuntimeConfig(cmd *cobra.Command) (map[string]any, bool, error) {
+	changedConfig := cmd.Flags().Changed("runtime-config")
+	changedMode := cmd.Flags().Changed("autonomy-mode")
+	if !changedConfig && !changedMode {
+		return nil, false, nil
+	}
+
+	cfg := map[string]any{}
+	if changedConfig {
+		v, _ := cmd.Flags().GetString("runtime-config")
+		if err := json.Unmarshal([]byte(v), &cfg); err != nil {
+			return nil, false, fmt.Errorf("--runtime-config must be a JSON object: %w", err)
+		}
+		if cfg == nil {
+			cfg = map[string]any{}
+		}
+	}
+
+	if changedMode {
+		mode, _ := cmd.Flags().GetString("autonomy-mode")
+		switch mode {
+		case "supervised", "full-access":
+			cfg["autonomy_mode"] = mode
+		default:
+			return nil, false, fmt.Errorf("--autonomy-mode must be supervised or full-access")
+		}
+	}
+
+	return cfg, true, nil
 }
 
 // resolveCustomEnv collects the --custom-env, --custom-env-stdin, and

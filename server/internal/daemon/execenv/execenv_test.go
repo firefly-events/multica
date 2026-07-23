@@ -2255,7 +2255,7 @@ func TestEnsureCodexSandboxConfigCreatesDefaultLinux(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.toml")
 
-	policy := codexSandboxPolicyFor("linux", "0.121.0")
+	policy := codexSandboxPolicyFor("linux", "0.121.0", "supervised")
 	if err := ensureCodexSandboxConfig(configPath, policy, "0.121.0", testLogger()); err != nil {
 		t.Fatalf("ensureCodexSandboxConfig failed: %v", err)
 	}
@@ -2270,6 +2270,9 @@ func TestEnsureCodexSandboxConfigCreatesDefaultLinux(t *testing.T) {
 	}
 	if !strings.Contains(s, `sandbox_mode = "workspace-write"`) {
 		t.Error("missing sandbox_mode")
+	}
+	if !strings.Contains(s, `approval_policy = "on-request"`) {
+		t.Error("missing approval_policy")
 	}
 	// The managed block uses TOML dotted-key form rather than a
 	// `[sandbox_workspace_write]` section header so it cannot leak into or
@@ -2288,7 +2291,7 @@ func TestEnsureCodexSandboxConfigDarwinFallsBack(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.toml")
 
-	policy := codexSandboxPolicyFor("darwin", "0.121.0")
+	policy := codexSandboxPolicyFor("darwin", "0.121.0", "supervised")
 	if err := ensureCodexSandboxConfig(configPath, policy, "0.121.0", testLogger()); err != nil {
 		t.Fatalf("ensureCodexSandboxConfig failed: %v", err)
 	}
@@ -2307,7 +2310,7 @@ func TestEnsureCodexSandboxConfigIsIdempotent(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.toml")
 
-	policy := codexSandboxPolicyFor("linux", "0.121.0")
+	policy := codexSandboxPolicyFor("linux", "0.121.0", "supervised")
 	for i := 0; i < 3; i++ {
 		if err := ensureCodexSandboxConfig(configPath, policy, "0.121.0", testLogger()); err != nil {
 			t.Fatalf("pass %d: %v", i, err)
@@ -2330,7 +2333,7 @@ approval_policy = "on-failure"
 `
 	os.WriteFile(configPath, []byte(existing), 0o644)
 
-	policy := codexSandboxPolicyFor("linux", "0.121.0")
+	policy := codexSandboxPolicyFor("linux", "0.121.0", "supervised")
 	if err := ensureCodexSandboxConfig(configPath, policy, "0.121.0", testLogger()); err != nil {
 		t.Fatalf("ensureCodexSandboxConfig failed: %v", err)
 	}
@@ -2340,8 +2343,8 @@ approval_policy = "on-failure"
 	if !strings.Contains(s, `model = "o3"`) {
 		t.Error("lost existing model setting")
 	}
-	if !strings.Contains(s, "approval_policy") {
-		t.Error("lost existing approval_policy")
+	if strings.Count(s, "approval_policy") != 1 || !strings.Contains(s, `approval_policy = "on-request"`) {
+		t.Errorf("expected one managed approval_policy, got:\n%s", s)
 	}
 	if !strings.Contains(s, "network_access = true") {
 		t.Error("missing network_access = true")
@@ -2365,7 +2368,7 @@ network_access = true
 `
 	os.WriteFile(configPath, []byte(existing), 0o644)
 
-	policy := codexSandboxPolicyFor("darwin", "0.121.0")
+	policy := codexSandboxPolicyFor("darwin", "0.121.0", "supervised")
 	if err := ensureCodexSandboxConfig(configPath, policy, "0.121.0", testLogger()); err != nil {
 		t.Fatalf("ensureCodexSandboxConfig failed: %v", err)
 	}
@@ -2404,7 +2407,7 @@ trust = "always"
 `
 	os.WriteFile(configPath, []byte(existing), 0o644)
 
-	policy := codexSandboxPolicyFor("linux", "0.121.0")
+	policy := codexSandboxPolicyFor("linux", "0.121.0", "supervised")
 	if err := ensureCodexSandboxConfig(configPath, policy, "0.121.0", testLogger()); err != nil {
 		t.Fatalf("ensureCodexSandboxConfig failed: %v", err)
 	}
@@ -2469,7 +2472,7 @@ network_access = true
 `
 	os.WriteFile(configPath, []byte(legacy), 0o644)
 
-	policy := codexSandboxPolicyFor("linux", "0.121.0")
+	policy := codexSandboxPolicyFor("linux", "0.121.0", "supervised")
 	if err := ensureCodexSandboxConfig(configPath, policy, "0.121.0", testLogger()); err != nil {
 		t.Fatalf("ensureCodexSandboxConfig failed: %v", err)
 	}
@@ -2507,17 +2510,33 @@ func TestCodexSandboxPolicyFor(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			p := codexSandboxPolicyFor(tc.goos, tc.version)
+			p := codexSandboxPolicyFor(tc.goos, tc.version, "supervised")
 			if p.Mode != tc.wantMode {
 				t.Errorf("mode = %q, want %q", p.Mode, tc.wantMode)
 			}
 			if p.NetworkAccess != tc.wantNet {
 				t.Errorf("network_access = %v, want %v", p.NetworkAccess, tc.wantNet)
 			}
+			if p.ApprovalPolicy != "on-request" {
+				t.Errorf("approval_policy = %q, want on-request", p.ApprovalPolicy)
+			}
 			if p.Reason == "" {
 				t.Error("expected non-empty Reason")
 			}
 		})
+	}
+}
+
+func TestCodexSandboxPolicyFullAccessMode(t *testing.T) {
+	p := codexSandboxPolicyFor("linux", "0.121.0", "full-access")
+	if p.Mode != "danger-full-access" {
+		t.Fatalf("mode = %q, want danger-full-access", p.Mode)
+	}
+	if p.ApprovalPolicy != "never" {
+		t.Fatalf("approval_policy = %q, want never", p.ApprovalPolicy)
+	}
+	if p.NetworkAccess {
+		t.Fatal("network_access should not be emitted for danger-full-access")
 	}
 }
 

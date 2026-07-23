@@ -40,33 +40,47 @@ type codexSandboxPolicy struct {
 	NetworkAccess bool
 	// Reason is a short human-readable label used in warn-level logs.
 	Reason string
+	// ApprovalPolicy is written to Codex config.toml so the runtime, not the
+	// prompt, decides whether risky actions need approval.
+	ApprovalPolicy string
 }
 
 // codexSandboxPolicyFor picks the right policy for the given platform and
 // detected Codex CLI version.
 //
-// - Non-darwin: always workspace-write with network access (Landlock is not
-//   affected by the macOS Seatbelt bug).
-// - darwin with a version at or above CodexDarwinNetworkAccessFixedVersion:
-//   workspace-write with network access (upstream bug fixed).
-// - darwin otherwise (including when the version is unknown): fall back to
-//   danger-full-access so the Multica CLI can reach the API.
-func codexSandboxPolicyFor(goos, detectedVersion string) codexSandboxPolicy {
+//   - Non-darwin: always workspace-write with network access (Landlock is not
+//     affected by the macOS Seatbelt bug).
+//   - darwin with a version at or above CodexDarwinNetworkAccessFixedVersion:
+//     workspace-write with network access (upstream bug fixed).
+//   - darwin otherwise (including when the version is unknown): fall back to
+//     danger-full-access so the Multica CLI can reach the API.
+func codexSandboxPolicyFor(goos, detectedVersion, autonomyMode string) codexSandboxPolicy {
+	approvalPolicy := "on-request"
+	if autonomyMode == "full-access" {
+		return codexSandboxPolicy{
+			Mode:           "danger-full-access",
+			NetworkAccess:  false,
+			Reason:         "operator selected full-access autonomy mode",
+			ApprovalPolicy: "never",
+		}
+	}
 	if goos == "" {
 		goos = runtime.GOOS
 	}
 	if goos != "darwin" {
 		return codexSandboxPolicy{
-			Mode:          "workspace-write",
-			NetworkAccess: true,
-			Reason:        "non-darwin platform — seatbelt bug does not apply",
+			Mode:           "workspace-write",
+			NetworkAccess:  true,
+			Reason:         "non-darwin platform — seatbelt bug does not apply",
+			ApprovalPolicy: approvalPolicy,
 		}
 	}
 	if codexDarwinNetworkAccessFixed(detectedVersion) {
 		return codexSandboxPolicy{
-			Mode:          "workspace-write",
-			NetworkAccess: true,
-			Reason:        "codex version includes macOS network_access fix",
+			Mode:           "workspace-write",
+			NetworkAccess:  true,
+			Reason:         "codex version includes macOS network_access fix",
+			ApprovalPolicy: approvalPolicy,
 		}
 	}
 	reason := "codex on macOS: seatbelt ignores sandbox_workspace_write.network_access (openai/codex#10390)"
@@ -74,9 +88,10 @@ func codexSandboxPolicyFor(goos, detectedVersion string) codexSandboxPolicy {
 		reason += " — version unknown, assuming broken"
 	}
 	return codexSandboxPolicy{
-		Mode:          "danger-full-access",
-		NetworkAccess: false,
-		Reason:        reason,
+		Mode:           "danger-full-access",
+		NetworkAccess:  false,
+		Reason:         reason,
+		ApprovalPolicy: approvalPolicy,
 	}
 }
 
@@ -132,6 +147,9 @@ func renderMulticaManagedBlock(policy codexSandboxPolicy) string {
 	b.WriteString(multicaManagedBeginMarker)
 	b.WriteString("\n")
 	b.WriteString(fmt.Sprintf("sandbox_mode = %q\n", policy.Mode))
+	if policy.ApprovalPolicy != "" {
+		b.WriteString(fmt.Sprintf("approval_policy = %q\n", policy.ApprovalPolicy))
+	}
 	if policy.Mode == "workspace-write" {
 		b.WriteString(fmt.Sprintf("sandbox_workspace_write.network_access = %t\n", policy.NetworkAccess))
 	}
@@ -171,7 +189,8 @@ func upsertMulticaManagedBlock(content string, policy codexSandboxPolicy) string
 	return block + "\n" + content
 }
 
-// stripLegacySandboxDirectives removes top-level `sandbox_mode = ...` lines
+// stripLegacySandboxDirectives removes top-level `sandbox_mode = ...` and
+// `approval_policy = ...` lines
 // and any `[sandbox_workspace_write]` section that would otherwise conflict
 // with the managed block. This lets the daemon migrate tasks whose config.toml
 // was produced by an older daemon that wrote those values inline.
@@ -197,8 +216,8 @@ func stripLegacySandboxDirectives(content string) string {
 			// Drop the legacy section body until the next section.
 			continue
 		}
-		if strings.HasPrefix(trimmed, "sandbox_mode") {
-			// Drop legacy top-level sandbox_mode declarations.
+		if strings.HasPrefix(trimmed, "sandbox_mode") || strings.HasPrefix(trimmed, "approval_policy") {
+			// Drop legacy top-level sandbox / approval declarations.
 			continue
 		}
 		out = append(out, line)

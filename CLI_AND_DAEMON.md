@@ -223,6 +223,14 @@ Agent-specific overrides:
 
 `MULTICA_CLAUDE_ARGS` and `MULTICA_CODEX_ARGS` are parsed with POSIX shellword quoting, so values such as `--model "gpt-5.1 codex" --sandbox read-only` are split like a shell command line. Agent arguments are applied in this order: hardcoded Multica defaults, daemon-wide env defaults, then per-agent `custom_args` from the task.
 
+Agent runtime autonomy is stored in `agent.runtime_config.autonomy_mode` and
+can be set with `multica agent create/update --autonomy-mode supervised|full-access`.
+Missing `autonomy_mode` means `supervised`, which is also the rollback path:
+clear the field or stop sending the flag to return to the default runtime
+behavior. For Codex runs, the daemon enforces the selected mode at the per-task
+`CODEX_HOME/config.toml` boundary and filters custom args / `-c` overrides that
+try to replace the managed sandbox or approval policy.
+
 ### Self-Hosted Server
 
 When connecting to a self-hosted Multica instance, the easiest approach is:
