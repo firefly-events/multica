@@ -344,8 +344,13 @@ func main() {
 		liveness = handler.NewRedisLivenessStore(storeRedis)
 	}
 
-	// Start background sweeper to mark stale runtimes as offline.
-	go runRuntimeSweeper(sweepCtx, queries, liveness, taskSvc, bus)
+	if taskSvc.HybridOrchestrator {
+		slog.Info("hybrid orchestrator enabled; legacy runtime sweeper disabled")
+		go runHybridDispatcher(sweepCtx, taskSvc, envHybridDispatchConfig())
+	} else {
+		// Start background sweeper to mark stale runtimes as offline.
+		go runRuntimeSweeper(sweepCtx, queries, liveness, taskSvc, bus)
+	}
 	go heartbeatScheduler.Run(sweepCtx)
 	go runAutopilotScheduler(autopilotCtx, queries, autopilotSvc)
 	go runAutopilotFailureMonitor(autopilotCtx, queries, bus, envFailureMonitorConfig())
