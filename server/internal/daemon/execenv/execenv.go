@@ -38,6 +38,7 @@ type PrepareParams struct {
 	AgentName      string // for git branch naming only
 	Provider       string // agent provider (determines runtime config and skill injection paths)
 	CodexVersion   string // detected Codex CLI version (only used when Provider == "codex")
+	AutonomyMode   string // supervised (default) or full-access; only enforced by providers with runtime-boundary controls
 	OpenclawBin    string // resolved openclaw CLI path (only used when Provider == "openclaw"); empty = look up on PATH
 	// McpConfig is the agent's saved `mcp_config` JSON, forwarded to the
 	// provider-specific config preparer when that provider materialises MCP
@@ -233,7 +234,7 @@ func Prepare(params PrepareParams, logger *slog.Logger) (*Environment, error) {
 	// For Codex, set up a per-task CODEX_HOME seeded from ~/.codex/ with skills.
 	if params.Provider == "codex" {
 		codexHome := filepath.Join(envRoot, "codex-home")
-		if err := prepareCodexHomeWithOpts(codexHome, CodexHomeOptions{CodexVersion: params.CodexVersion}, logger); err != nil {
+		if err := prepareCodexHomeWithOpts(codexHome, CodexHomeOptions{CodexVersion: params.CodexVersion, AutonomyMode: params.AutonomyMode}, logger); err != nil {
 			return nil, fmt.Errorf("execenv: prepare codex-home: %w", err)
 		}
 		if err := hydrateCodexSkills(codexHome, params.Task.AgentSkills, logger); err != nil {
@@ -283,12 +284,13 @@ func Prepare(params PrepareParams, logger *slog.Logger) (*Environment, error) {
 }
 
 // ReuseParams describes the inputs to Reuse. It mirrors PrepareParams for
-// the per-provider knobs (CodexVersion, OpenclawBin) so callers can pass
+// the per-provider knobs (CodexVersion, AutonomyMode, OpenclawBin) so callers can pass
 // the same resolved binary path on both first-run and reuse paths.
 type ReuseParams struct {
 	WorkDir      string
 	Provider     string
 	CodexVersion string // only used when Provider == "codex"
+	AutonomyMode string // only used by providers with runtime-boundary controls
 	OpenclawBin  string // only used when Provider == "openclaw"; empty = PATH lookup
 	// McpConfig is the agent's saved `mcp_config` JSON. Reused on reuse so a
 	// freshly-saved managed set re-materialises into the wrapper before the
@@ -388,7 +390,7 @@ func Reuse(params ReuseParams, logger *slog.Logger) *Environment {
 	// config (especially sandbox/network access) is up to date.
 	if params.Provider == "codex" {
 		codexHome := filepath.Join(env.RootDir, "codex-home")
-		if err := prepareCodexHomeWithOpts(codexHome, CodexHomeOptions{CodexVersion: params.CodexVersion}, logger); err != nil {
+		if err := prepareCodexHomeWithOpts(codexHome, CodexHomeOptions{CodexVersion: params.CodexVersion, AutonomyMode: params.AutonomyMode}, logger); err != nil {
 			logger.Warn("execenv: refresh codex-home failed", "error", err)
 		} else {
 			env.CodexHome = codexHome

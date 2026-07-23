@@ -1,6 +1,13 @@
 export type AgentStatus = "idle" | "working" | "blocked" | "error" | "offline";
 
 export type AgentRuntimeMode = "local" | "cloud";
+export type RuntimeAutonomyMode = "supervised" | "full-access";
+
+export interface AgentRuntimeConfig {
+  /** Runtime-boundary autonomy mode. Missing means "supervised". */
+  autonomy_mode?: RuntimeAutonomyMode;
+  [key: string]: unknown;
+}
 
 export type AgentVisibility = "workspace" | "private";
 
@@ -149,7 +156,7 @@ export interface Agent {
   instructions: string;
   avatar_url: string | null;
   runtime_mode: AgentRuntimeMode;
-  runtime_config: Record<string, unknown>;
+  runtime_config: AgentRuntimeConfig;
   custom_args: string[];
   /**
    * Coarse metadata signalling whether the agent has any custom env
@@ -233,7 +240,7 @@ export interface CreateAgentRequest {
   instructions?: string;
   avatar_url?: string;
   runtime_id: string;
-  runtime_config?: Record<string, unknown>;
+  runtime_config?: AgentRuntimeConfig;
   custom_env?: Record<string, string>;
   custom_args?: string[];
   visibility?: AgentVisibility;
@@ -322,7 +329,7 @@ export interface UpdateAgentRequest {
   instructions?: string;
   avatar_url?: string;
   runtime_id?: string;
-  runtime_config?: Record<string, unknown>;
+  runtime_config?: AgentRuntimeConfig;
   /**
    * NOTE: `custom_env` is intentionally NOT updatable through this
    * request shape. Env edits flow through `client.updateAgentEnv` /

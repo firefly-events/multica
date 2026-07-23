@@ -2768,11 +2768,16 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 	if task.Agent != nil && provider == "openclaw" {
 		openclawMode, openclawGateway = decodeOpenclawRuntimeConfig(task.Agent.RuntimeConfig, d.logger)
 	}
+	autonomyMode := runtimeAutonomySupervised
+	if task.Agent != nil {
+		autonomyMode = decodeRuntimeAutonomyMode(task.Agent.RuntimeConfig, d.logger)
+	}
 	if task.PriorWorkDir != "" && localAssignment == nil {
 		env = execenv.Reuse(execenv.ReuseParams{
 			WorkDir:         task.PriorWorkDir,
 			Provider:        provider,
 			CodexVersion:    codexVersion,
+			AutonomyMode:    autonomyMode,
 			OpenclawBin:     openclawBin,
 			McpConfig:       agentMcpConfig,
 			OpenclawGateway: openclawGateway,
@@ -2788,6 +2793,7 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 			AgentName:       agentName,
 			Provider:        provider,
 			CodexVersion:    codexVersion,
+			AutonomyMode:    autonomyMode,
 			OpenclawBin:     openclawBin,
 			McpConfig:       agentMcpConfig,
 			OpenclawGateway: openclawGateway,
@@ -2822,7 +2828,7 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 	if err := d.client.StartTask(ctx, task.ID); err != nil {
 		return TaskResult{}, fmt.Errorf("start task failed: %w", err)
 	}
-	_ = d.client.ReportProgress(ctx, task.ID, fmt.Sprintf("Launching %s", provider), 1, 2)
+	_ = d.client.ReportProgress(ctx, task.ID, fmt.Sprintf("Launching %s (%s autonomy)", provider, autonomyMode), 1, 2)
 
 	reused := gateResumeToReusedWorkdir(&task, &taskCtx, env.WorkDir, taskLog)
 
@@ -2974,6 +2980,7 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 
 	taskLog.Info("starting agent",
 		"provider", provider,
+		"autonomy_mode", autonomyMode,
 		"workdir", env.WorkDir,
 		"model", entry.Model,
 		"reused", reused,

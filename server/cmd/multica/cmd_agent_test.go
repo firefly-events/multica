@@ -32,6 +32,13 @@ func freshAgentEnvSetCmd() *cobra.Command {
 	return c
 }
 
+func freshAgentRuntimeConfigCmd() *cobra.Command {
+	c := &cobra.Command{Use: "agent"}
+	c.Flags().String("runtime-config", "", "")
+	c.Flags().String("autonomy-mode", "", "")
+	return c
+}
+
 // TestResolveWorkspaceID_AgentContextSkipsConfig is a regression test for
 // the cross-workspace contamination bug (#1235). Inside a daemon-spawned
 // agent task (MULTICA_AGENT_ID / MULTICA_TASK_ID set), the CLI must NOT
@@ -187,6 +194,54 @@ func TestParseCustomEnv(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestResolveRuntimeConfigAutonomyMode(t *testing.T) {
+	t.Parallel()
+
+	t.Run("mode only", func(t *testing.T) {
+		cmd := freshAgentRuntimeConfigCmd()
+		if err := cmd.Flags().Set("autonomy-mode", "full-access"); err != nil {
+			t.Fatal(err)
+		}
+		got, ok, err := resolveRuntimeConfig(cmd)
+		if err != nil {
+			t.Fatalf("resolveRuntimeConfig: %v", err)
+		}
+		if !ok || got["autonomy_mode"] != "full-access" {
+			t.Fatalf("got %#v ok=%v", got, ok)
+		}
+	})
+
+	t.Run("merges with runtime config", func(t *testing.T) {
+		cmd := freshAgentRuntimeConfigCmd()
+		if err := cmd.Flags().Set("runtime-config", `{"gateway":{"mode":"local"},"autonomy_mode":"supervised"}`); err != nil {
+			t.Fatal(err)
+		}
+		if err := cmd.Flags().Set("autonomy-mode", "full-access"); err != nil {
+			t.Fatal(err)
+		}
+		got, ok, err := resolveRuntimeConfig(cmd)
+		if err != nil {
+			t.Fatalf("resolveRuntimeConfig: %v", err)
+		}
+		if !ok || got["autonomy_mode"] != "full-access" {
+			t.Fatalf("got %#v ok=%v", got, ok)
+		}
+		if _, ok := got["gateway"]; !ok {
+			t.Fatalf("expected existing gateway config to survive, got %#v", got)
+		}
+	})
+
+	t.Run("invalid mode", func(t *testing.T) {
+		cmd := freshAgentRuntimeConfigCmd()
+		if err := cmd.Flags().Set("autonomy-mode", "root"); err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := resolveRuntimeConfig(cmd); err == nil {
+			t.Fatal("expected invalid autonomy mode error")
+		}
+	})
 }
 
 // TestAgentUpdateNoFieldsErrorPointsAtEnvCommand invokes runAgentUpdate

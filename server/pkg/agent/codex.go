@@ -25,7 +25,9 @@ import (
 // stripped separately by filterCodexCustomConfigOverrides because they
 // share the `-c` flag with legitimate non-MCP overrides like `-c model=…`.
 var codexBlockedArgs = map[string]blockedArgMode{
-	"--listen": blockedWithValue, // stdio:// transport for daemon communication
+	"--listen":          blockedWithValue, // stdio:// transport for daemon communication
+	"--sandbox":         blockedWithValue, // daemon-managed via $CODEX_HOME/config.toml
+	"--approval-policy": blockedWithValue, // daemon-managed runtime autonomy boundary
 }
 
 // codexStderrTailBytes bounds the stderr tail captured for inclusion in
@@ -92,10 +94,9 @@ func buildCodexArgs(opts ExecOptions, logger *slog.Logger) []string {
 	// mcp_config present, daemon-written `$CODEX_HOME/config.toml` is the
 	// authoritative source and stray `-c mcp_servers.*` overrides are
 	// dropped to keep last-wins from re-shadowing it.
-	if hasManagedCodexMcpConfig(opts.McpConfig) {
-		extra = filterCodexCustomConfigOverrides(extra, logger)
-		custom = filterCodexCustomConfigOverrides(custom, logger)
-	}
+	blockMcp := hasManagedCodexMcpConfig(opts.McpConfig)
+	extra = filterCodexCustomConfigOverrides(extra, blockMcp, logger)
+	custom = filterCodexCustomConfigOverrides(custom, blockMcp, logger)
 	args = append(args, extra...)
 	args = append(args, custom...)
 	return args
@@ -123,6 +124,7 @@ func hasManagedCodexMcpConfig(raw json.RawMessage) bool {
 // overrides that would otherwise shadow what the MCP Tab writes into
 // `$CODEX_HOME/config.toml`.
 var codexManagedMcpConfigKeyRe = regexp.MustCompile(`^\s*mcp_servers(?:\s*\.|\s*=|\s*$)`)
+var codexManagedRuntimeConfigKeyRe = regexp.MustCompile(`^\s*(?:sandbox_mode\s*=|approval_policy\s*=|sandbox_workspace_write(?:\s*\.|\s*=|\s*$))`)
 
 // filterCodexCustomConfigOverrides drops `-c mcp_servers.…=` and
 // `--config mcp_servers.…=` entries from custom args. Codex's `-c` is
@@ -132,7 +134,7 @@ var codexManagedMcpConfigKeyRe = regexp.MustCompile(`^\s*mcp_servers(?:\s*\.|\s*
 // own the `mcp_servers` namespace via the managed block, so user attempts
 // to write into it are dropped with a warning rather than allowed to win.
 // Other `-c`/`--config` keys (e.g. `-c model="o3"`) pass through unchanged.
-func filterCodexCustomConfigOverrides(args []string, logger *slog.Logger) []string {
+func filterCodexCustomConfigOverrides(args []string, blockMcp bool, logger *slog.Logger) []string {
 	if len(args) == 0 {
 		return args
 	}
@@ -152,16 +154,13 @@ func filterCodexCustomConfigOverrides(args []string, logger *slog.Logger) []stri
 			if !hasInlineValue && i+1 < len(args) {
 				value = args[i+1]
 			}
-			if codexManagedMcpConfigKeyRe.MatchString(value) {
+			if codexManagedRuntimeConfigKeyRe.MatchString(value) || (blockMcp && codexManagedMcpConfigKeyRe.MatchString(value)) {
 				if logger != nil {
-					// Log the key only, never the value — mcp_servers.<name>.env
-					// is allowed to carry secrets and the whole point of moving
-					// this to config.toml is to keep raw values out of logs/argv.
 					key := value
 					if eqIdx := strings.Index(value, "="); eqIdx >= 0 {
 						key = value[:eqIdx]
 					}
-					logger.Warn("custom_args: blocked mcp_servers override; daemon manages this via CODEX_HOME/config.toml",
+					logger.Warn("custom_args: blocked daemon-managed Codex config override",
 						"flag", flag, "key", strings.TrimSpace(key))
 				}
 				if !hasInlineValue && i+1 < len(args) {

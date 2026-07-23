@@ -1550,19 +1550,19 @@ func TestWithAgentStderrAppendsHint(t *testing.T) {
 
 func TestBuildCodexArgsExtraArgsBeforeCustomArgsAndFiltersBoth(t *testing.T) {
 	args := buildCodexArgs(ExecOptions{
-		ExtraArgs:  []string{"--listen", "tcp://evil", "--sandbox", "read-only"},
-		CustomArgs: []string{"--sandbox", "workspace-write", "--listen=bad"},
+		ExtraArgs:  []string{"--listen", "tcp://evil", "--max-turns", "20"},
+		CustomArgs: []string{"--approval-policy", "never", "--max-turns", "40", "--listen=bad"},
 	}, slog.Default())
 	joined := strings.Join(args, " ")
-	if strings.Contains(joined, "tcp://evil") || strings.Contains(joined, "--listen=bad") {
+	if strings.Contains(joined, "tcp://evil") || strings.Contains(joined, "--listen=bad") || strings.Contains(joined, "--approval-policy") {
 		t.Fatalf("blocked args should be filtered from both layers: %v", args)
 	}
 	extraIdx, customIdx := -1, -1
 	for i := 0; i+1 < len(args); i++ {
-		if args[i] == "--sandbox" && args[i+1] == "read-only" {
+		if args[i] == "--max-turns" && args[i+1] == "20" {
 			extraIdx = i
 		}
-		if args[i] == "--sandbox" && args[i+1] == "workspace-write" {
+		if args[i] == "--max-turns" && args[i+1] == "40" {
 			customIdx = i
 		}
 	}
@@ -1606,6 +1606,31 @@ func TestBuildCodexArgsDoesNotLeakMcpToArgv(t *testing.T) {
 	}
 	if !foundModel {
 		t.Fatalf("expected non-mcp -c override to be preserved, got %v", args)
+	}
+}
+
+func TestBuildCodexArgsBlocksRuntimeBoundaryConfigOverrides(t *testing.T) {
+	t.Parallel()
+
+	args := buildCodexArgs(ExecOptions{
+		ExtraArgs: []string{
+			"-c", `sandbox_mode="danger-full-access"`,
+			"--config=approval_policy=\"never\"",
+			"-c", `model="o3"`,
+		},
+		CustomArgs: []string{
+			"--config", "sandbox_workspace_write.network_access=false",
+			"--keep-me",
+		},
+	}, slog.Default())
+	joined := strings.Join(args, " ")
+	for _, blocked := range []string{"sandbox_mode", "approval_policy", "sandbox_workspace_write"} {
+		if strings.Contains(joined, blocked) {
+			t.Fatalf("runtime boundary config override %q leaked into args: %v", blocked, args)
+		}
+	}
+	if !strings.Contains(joined, `model="o3"`) || !strings.Contains(joined, "--keep-me") {
+		t.Fatalf("legitimate custom args should survive, got %v", args)
 	}
 }
 
@@ -1774,7 +1799,7 @@ func TestFilterCodexCustomConfigOverridesDropsMcpServers(t *testing.T) {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got := filterCodexCustomConfigOverrides(tc.in, slog.Default())
+			got := filterCodexCustomConfigOverrides(tc.in, true, slog.Default())
 			if !reflect.DeepEqual(got, tc.want) {
 				t.Fatalf("filterCodexCustomConfigOverrides(%v) = %v, want %v", tc.in, got, tc.want)
 			}

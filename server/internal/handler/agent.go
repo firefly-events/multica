@@ -31,6 +31,33 @@ import (
 // char_length and the front-end's String.prototype.length-with-counter UX.
 const maxAgentDescriptionLength = 255
 
+const (
+	agentRuntimeAutonomySupervised = "supervised"
+	agentRuntimeAutonomyFullAccess = "full-access"
+)
+
+func validateAgentRuntimeConfig(value any) error {
+	if value == nil {
+		return nil
+	}
+	raw, err := json.Marshal(value)
+	if err != nil {
+		return err
+	}
+	var cfg struct {
+		AutonomyMode string `json:"autonomy_mode"`
+	}
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		return err
+	}
+	switch cfg.AutonomyMode {
+	case "", agentRuntimeAutonomySupervised, agentRuntimeAutonomyFullAccess:
+		return nil
+	default:
+		return fmt.Errorf("runtime_config.autonomy_mode must be %q or %q", agentRuntimeAutonomySupervised, agentRuntimeAutonomyFullAccess)
+	}
+}
+
 type AgentResponse struct {
 	ID            string          `json:"id"`
 	WorkspaceID   string          `json:"workspace_id"`
@@ -782,6 +809,10 @@ func (h *Handler) CreateAgent(w http.ResponseWriter, r *http.Request) {
 	// public mask sentinel as gateway.token (e.g. replayed a masked GET body)
 	// drop it rather than persisting a literal "***" as a real bearer token.
 	preserveMaskedGatewayToken(req.RuntimeConfig, nil)
+	if err := validateAgentRuntimeConfig(req.RuntimeConfig); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	rc, _ := json.Marshal(req.RuntimeConfig)
 	if req.RuntimeConfig == nil {
 		rc = []byte("{}")
@@ -1041,6 +1072,10 @@ func (h *Handler) UpdateAgent(w http.ResponseWriter, r *http.Request) {
 		// PATCHes the same payload back round-trips "***" into the database
 		// and silently destroys the real secret (issue #3260).
 		preserveMaskedGatewayToken(req.RuntimeConfig, existing.RuntimeConfig)
+		if err := validateAgentRuntimeConfig(req.RuntimeConfig); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
 		rc, _ := json.Marshal(req.RuntimeConfig)
 		params.RuntimeConfig = rc
 	}
