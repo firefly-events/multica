@@ -1,0 +1,108 @@
+name: Sync upstream (multica-ai/multica)
+
+# Keeps this fork's main branch current with multica-ai/multica's real upstream
+# development. Runs daily; also triggerable by hand for an out-of-band sync.
+#
+# Design intent (see repo history around 2026-09-21 for the first manual sync):
+# - A clean merge is pushed to a dated branch and opened as a PR against main,
+#   with auto-merge enabled so it lands once CI is green -- no different from
+#   a human opening the same PR and waiting on the same checks.
+# - A merge with real conflicts is NEVER auto-resolved or force-pushed. The
+#   job fails loudly (visible in the Actions tab / any configured failure
+#   notifications) and leaves main untouched, so a human resolves it the same
+#   way the first sync (PR #19) was resolved: by reading real source on both
+#   sides, not by guessing.
+
+on:
+  schedule:
+    - cron: "0 6 * * *" # 06:00 UTC daily
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout fork
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure git identity
+        run: |
+          git config user.name "firefly-events-sync-bot"
+          git config user.email "actions@github.com"
+
+      - name: Add upstream remote
+        run: git remote add upstream https://github.com/multica-ai/multica.git
+
+      - name: Fetch upstream + origin
+        run: |
+          git fetch upstream main
+          git fetch origin main
+
+      - name: Skip if already up to date
+        id: check
+        run: |
+          if git merge-base --is-ancestor upstream/main origin/main; then
+            echo "up_to_date=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "up_to_date=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create dated sync branch
+        if: steps.check.outputs.up_to_date == 'false'
+        run: |
+          BRANCH="sync/upstream-$(date -u +%Y-%m-%d)"
+          echo "BRANCH=$BRANCH" >> "$GITHUB_ENV"
+          git checkout -b "$BRANCH" origin/main
+
+      - name: Merge upstream/main
+        if: steps.check.outputs.up_to_date == 'false'
+        id: merge
+        run: |
+          if git merge upstream/main --no-edit; then
+            echo "conflict=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "conflict=true" >> "$GITHUB_OUTPUT"
+            git merge --abort || true
+          fi
+
+      - name: Fail loudly on conflict (no auto-resolution, no push)
+        if: steps.check.outputs.up_to_date == 'false' && steps.merge.outputs.conflict == 'true'
+        run: |
+          echo "::error::Upstream sync hit real merge conflicts against multica-ai/multica main. Not auto-resolving or force-pushing -- resolve by hand (see PR #19 for the established pattern: read current source on both sides, never guess an API shape)."
+          exit 1
+
+      - name: Push sync branch
+        if: steps.check.outputs.up_to_date == 'false' && steps.merge.outputs.conflict == 'false'
+        run: git push origin "$BRANCH"
+
+      - name: Open PR
+        if: steps.check.outputs.up_to_date == 'false' && steps.merge.outputs.conflict == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          EXISTING=$(gh pr list --repo "$GITHUB_REPOSITORY" --head "$BRANCH" --json number --jq '.[0].number // empty')
+          if [ -z "$EXISTING" ]; then
+            gh pr create --repo "$GITHUB_REPOSITORY" \
+              --base main --head "$BRANCH" \
+              --title "Sync upstream multica-ai/multica ($(date -u +%Y-%m-%d))" \
+              --body "Automated daily sync from multica-ai/multica main. Clean merge, no conflicts. Auto-merge is enabled -- this lands once CI is green. If CI fails, this needs the same manual triage as any other red PR, not a re-run of this job."
+            PR_NUMBER=$(gh pr list --repo "$GITHUB_REPOSITORY" --head "$BRANCH" --json number --jq '.[0].number')
+          else
+            PR_NUMBER="$EXISTING"
+          fi
+          echo "PR_NUMBER=$PR_NUMBER" >> "$GITHUB_ENV"
+
+      - name: Enable auto-merge
+        if: steps.check.outputs.up_to_date == 'false' && steps.merge.outputs.conflict == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh pr merge "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --auto --merge || \
+            echo "::warning::Could not enable auto-merge on PR #$PR_NUMBER (repo setting may be off). PR is still open for manual merge."
