@@ -14,7 +14,6 @@ import { View } from "react-native";
 import type {
   InboxItem,
   InboxItemType,
-  IssueStatus,
   IssuePriority,
 } from "@multica/core/types";
 import { formatDateOnly } from "@multica/core/issues/date";
@@ -22,18 +21,8 @@ import { Text } from "@/components/ui/text";
 import { StatusIcon } from "@/components/ui/status-icon";
 import { PriorityIcon } from "@/components/ui/priority-icon";
 import { useActorLookup } from "@/data/use-actor-name";
+import { useIssueStatuses } from "@/lib/use-issue-statuses";
 import { cn } from "@/lib/utils";
-
-// Mirrors STATUS_CONFIG.label in packages/core/issues/config/status.ts
-const STATUS_LABEL: Record<IssueStatus, string> = {
-  backlog: "Backlog",
-  todo: "Todo",
-  in_progress: "In Progress",
-  in_review: "In Review",
-  done: "Done",
-  blocked: "Blocked",
-  cancelled: "Cancelled",
-};
 
 // Mirrors PRIORITY_CONFIG.label in packages/core/issues/config/priority.ts
 const PRIORITY_LABEL: Record<IssuePriority, string> = {
@@ -47,6 +36,7 @@ const PRIORITY_LABEL: Record<IssuePriority, string> = {
 // Mirrors useTypeLabels in packages/views/inbox/components/inbox-detail-label.tsx
 const TYPE_LABEL: Record<InboxItemType, string> = {
   issue_assigned: "Assigned",
+  issue_subscribed: "Subscribed",
   unassigned: "Unassigned",
   assignee_changed: "Reassigned",
   status_changed: "Status changed",
@@ -63,6 +53,9 @@ const TYPE_LABEL: Record<InboxItemType, string> = {
   reaction_added: "Reaction added",
   quick_create_done: "Quick-create done",
   quick_create_failed: "Quick-create failed",
+  quick_create_unconfirmed: "Quick-create needs a check",
+  autopilot_paused: "Autopilot paused",
+  autopilot_quota_exceeded: "Autopilot run limit reached",
 };
 
 // due_date is a calendar day — format timezone-safely (no offset day shift).
@@ -82,17 +75,25 @@ export function InboxDetailLabel({
   className?: string;
 }) {
   const { getName } = useActorLookup();
+  // `details.to` is a status KEY and may be a custom one, so its name, colour
+  // and glyph all resolve through the workspace catalog. (MUL-6243)
+  const { categoryOf, colorOf, labelOf, iconOf } = useIssueStatuses();
   const details = item.details ?? {};
 
   // Cases with inline icons → Row layout.
   if (item.type === "status_changed" && details.to) {
-    const status = details.to as IssueStatus;
+    const status = details.to;
     return (
       <View className={cn("flex-row items-center gap-1", className)}>
         <Text className="text-xs text-muted-foreground">Set status to</Text>
-        <StatusIcon status={status} size={12} />
+        <StatusIcon
+          status={status}
+          category={categoryOf(status)}
+          icon={iconOf(status)} color={colorOf(status)}
+          size={12}
+        />
         <Text className="text-xs text-muted-foreground" numberOfLines={1}>
-          {STATUS_LABEL[status] ?? status}
+          {labelOf(status)}
         </Text>
       </View>
     );
@@ -144,6 +145,15 @@ export function InboxDetailLabel({
         const detail = singleLine(details.error) || singleLine(item.body);
         return detail ? `Failed: ${detail}` : TYPE_LABEL[item.type];
       }
+      // Mirrors packages/views/inbox/components/inbox-detail-label.tsx: the
+      // unconfirmed outcome deliberately drops the "Failed:" prefix, because
+      // the issue may actually have been created.
+      case "quick_create_unconfirmed": {
+        const detail = singleLine(details.error) || singleLine(item.body);
+        return detail || TYPE_LABEL[item.type];
+      }
+      case "autopilot_quota_exceeded":
+        return "Run blocked because the limit was reached";
       default:
         return TYPE_LABEL[item.type] ?? item.type;
     }

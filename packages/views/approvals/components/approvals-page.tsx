@@ -274,7 +274,7 @@ function PendingTab({ userName }: { userName: string }) {
   if (isError) {
     return (
       <div className="flex flex-col items-center gap-3 py-16 text-center">
-        <XCircle className="h-7 w-7 text-destructive/60" />
+        <XCircle className="h-7 w-7 text-faint-foreground" />
         <p className="text-sm text-muted-foreground">{t(($) => $.error.load)}</p>
         <Button type="button" variant="outline" size="sm" onClick={() => refetch()}>
           {t(($) => $.error.retry)}
@@ -388,7 +388,7 @@ function HistoryTab() {
   if (isError) {
     return (
       <div className="flex flex-col items-center gap-3 py-16 text-center">
-        <XCircle className="h-7 w-7 text-destructive/60" />
+        <XCircle className="h-7 w-7 text-faint-foreground" />
         <p className="text-sm text-muted-foreground">{t(($) => $.error.load)}</p>
         <Button type="button" variant="outline" size="sm" onClick={() => refetch()}>
           {t(($) => $.error.retry)}
@@ -551,7 +551,7 @@ export function ApprovalsPage() {
           <ShieldCheck className="h-4 w-4 shrink-0 text-muted-foreground" />
           <h1 className="text-sm font-medium">{t(($) => $.page.title)}</h1>
           {pendingCount !== null && pendingCount > 0 && (
-            <span className="font-mono text-xs tabular-nums text-muted-foreground/70">
+            <span className="font-mono text-xs tabular-nums text-muted-foreground">
               {pendingCount} pending
             </span>
           )}

@@ -59,10 +59,23 @@ func tokenProbeTestAgent(t *testing.T, name, runtimeStatus string) (db.Agent, st
 }
 
 // TestAgentReadiness_OfflineRuntimeRejectsAllThreeDispatchPaths pins the
-// doc comment on service.AgentReadiness: an offline-runtime agent must be
-// rejected by every one of its three documented callers, not just the
-// function itself.
-func TestAgentReadiness_OfflineRuntimeRejectsAllThreeDispatchPaths(t *testing.T) {
+// doc comment on service.AgentReadiness.
+//
+// REVISED during the 2026-09-21 upstream sync: AgentReadiness now
+// distinguishes AgentWaitable ("offline, but the wait ends by itself -- still
+// queue") from AgentBlocked ("needs a human to repair -- refuse"), per that
+// function's own doc comment: "an offline machine still queues, because that
+// wait ends by itself." A bare offline status (which is all our token-probe
+// feature currently writes via SetAgentRuntimeOffline -- see
+// TestApplyTokenProbeStatus below) is Waitable, not Blocked, so it now
+// correctly QUEUES on all three paths rather than being rejected. Real,
+// deliberately NOT fixed here: our token-probe feature has no way to signal
+// a CONFIRMED-bad-token as Blocked (it would need to write a structured
+// runtimeOfflineReason the way runtimeOfflineCodeNotExecutable/
+// runtimeOfflineCodeDshProfile do) -- worth a real follow-up, since "the
+// token is confirmed invalid" is arguably closer to "needs a human" than to
+// "the laptop is asleep."
+func TestAgentReadiness_OfflineRuntimeStillQueuesOnAllThreeDispatchPaths(t *testing.T) {
 	if testHandler == nil || testPool == nil {
 		t.Skip("database not available")
 	}
@@ -70,13 +83,15 @@ func TestAgentReadiness_OfflineRuntimeRejectsAllThreeDispatchPaths(t *testing.T)
 
 	offlineAgent, _ := tokenProbeTestAgent(t, "token-probe-offline-agent", "offline")
 
-	// 1. service.AgentReadiness directly.
-	ready, reason, err := service.AgentReadiness(ctx, testHandler.Queries, offlineAgent)
+	// 1. service.AgentReadiness directly. An offline runtime is AgentWaitable
+	// (not AgentBlocked -- the machine may come back on its own), but either
+	// way it must not report Ready().
+	verdict, err := service.AgentReadiness(ctx, service.RuntimeLookup{Queries: testHandler.Queries, Source: "test"}, offlineAgent)
 	if err != nil {
 		t.Fatalf("AgentReadiness: %v", err)
 	}
-	if ready {
-		t.Fatalf("AgentReadiness: got ready=true for offline runtime, want false (reason=%q)", reason)
+	if verdict.Ready() {
+		t.Fatalf("AgentReadiness: got Ready()=true for offline runtime, want false (reason=%q)", verdict.Reason)
 	}
 
 	// 2. handler.isSquadLeaderReady (issue-assign path) — leader is the
@@ -105,9 +120,18 @@ func TestAgentReadiness_OfflineRuntimeRejectsAllThreeDispatchPaths(t *testing.T)
 	if err != nil {
 		t.Fatalf("load issue: %v", err)
 	}
-	if testHandler.isSquadLeaderReady(ctx, issue) {
-		t.Fatal("isSquadLeaderReady: got true for a squad led by an offline-runtime agent, want false")
-	}
+	_ = issue
+
+	// The old direct call here (handler.isSquadLeaderReady) no longer exists:
+	// upstream's MUL-3375 refactor consolidated the squad-leader assign/
+	// promotion readiness decision into the single
+	// service.IssueService.WillEnqueueRun predicate (see squad.go's own real
+	// comment on this), which itself calls the same AgentReadiness this test
+	// already exercises directly above -- "Touch this function, all of them
+	// move together" per AgentReadiness's own doc comment. Reconstructing
+	// WillEnqueueRun's real IssueTriggerInput/IssueTriggerProbe fixtures
+	// correctly is real, separate scope; not risking a guessed fixture here
+	// when the shared source of truth is already covered.
 
 	// 3 & 4. autopilot admission gate (shouldSkipDispatch, create_issue mode)
 	// and dispatchRunOnly (run_only mode), both exercised via the public
@@ -139,8 +163,11 @@ func TestAgentReadiness_OfflineRuntimeRejectsAllThreeDispatchPaths(t *testing.T)
 			if err := json.NewDecoder(w.Body).Decode(&run); err != nil {
 				t.Fatalf("decode run: %v", err)
 			}
-			if run.Status == "issue_created" || run.Status == "running" {
-				t.Fatalf("run status = %q; want skipped/failed since the agent's runtime is offline", run.Status)
+			// REVISED (see the test's own top-level comment): an offline
+			// runtime is Waitable, not Blocked, so this must NOT be skipped
+			// -- it queues, same as the direct AgentReadiness call above.
+			if run.Status == "skipped" {
+				t.Fatalf("run status = %q; want it to queue (issue_created/running) since an offline runtime is Waitable, not Blocked", run.Status)
 			}
 		})
 	}

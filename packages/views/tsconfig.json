@@ -6,6 +6,6 @@
       "@claud-ometer/envelope": ["../../../Claud-ometer/src/lib/command/envelope.ts"]
     }
   },
-  "include": ["**/*.ts", "**/*.tsx"],
+  "include": ["**/*.ts", "**/*.tsx", "**/*.d.mts"],
   "exclude": ["node_modules", "dist"]
 }

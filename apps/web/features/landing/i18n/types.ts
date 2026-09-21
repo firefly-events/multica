@@ -11,6 +11,9 @@ export const localeLabels: Record<Locale, string> = {
   "zh-Hans": "\u4e2d\u6587",
   ko: "\ud55c\uad6d\uc5b4",
   ja: "\u65e5\u672c\u8a9e",
+  // The landing dictionary has no French variant yet, so `locales` above still
+  // offers four languages; this label only satisfies the Record type.
+  fr: "FR",
 };
 
 export function toLandingDictionaryLocale(
@@ -103,8 +106,8 @@ export type LandingDict = {
     title: string;
     nameLine: {
       prefix: string;
-      mul: string;
-      tiplexed: string;
+      mult: string;
+      iplexed: string;
       i: string;
       nformationAnd: string;
       c: string;
@@ -145,8 +148,8 @@ export type LandingDict = {
       macIntel: {
         title: string;
         sub: string;
-        disabledCta: string;
-        intelHint: string;
+        primary: string;
+        altZip: string;
       };
       winX64: { title: string; sub: string; primary: string };
       winArm64: { title: string; sub: string; primary: string };
@@ -162,7 +165,8 @@ export type LandingDict = {
     };
     allPlatforms: {
       title: string;
-      macLabel: string;
+      macArm64Label: string;
+      macX64Label: string;
       winX64Label: string;
       winArm64Label: string;
       linuxX64Label: string;
@@ -173,7 +177,6 @@ export type LandingDict = {
       formatAppImage: string;
       formatDeb: string;
       formatRpm: string;
-      intelNote: string;
       unavailable: string;
     };
     cli: {
@@ -198,8 +201,6 @@ export type LandingDict = {
     pageDescription: string;
     eyebrow: string;
     title: string;
-    subtitle: string;
-    notice: { badge: string; body: string };
     fields: {
       firstName: string;
       lastName: string;
@@ -210,7 +211,6 @@ export type LandingDict = {
       countryRegion: string;
       useCase: string;
       goals: string;
-      goalsHint: string;
       selectPlaceholder: string;
       submit: string;
       submitting: string;

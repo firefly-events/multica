@@ -92,7 +92,7 @@ func TestSendWSHeartbeats_SlowProbeDoesNotDelayOtherRuntimes(t *testing.T) {
 		d.runtimeIndex[rid] = Runtime{ID: rid, Provider: providers[i]}
 	}
 
-	writes := make(chan []byte, len(runtimeIDs))
+	writes := make(chan *wsOutbound, len(runtimeIDs))
 
 	done := make(chan struct{})
 	start := time.Now()
@@ -165,7 +165,10 @@ func TestRegisterRuntimesForWorkspace_SlowProbeDoesNotDelayOtherProviders(t *tes
 	done := make(chan result)
 	start := time.Now()
 	go func() {
-		_, err := d.registerRuntimesForWorkspace(context.Background(), "ws-1")
+		err := d.withWorkspaceRegisterLock("ws-1", func() error {
+			_, _, _, err := d.registerRuntimesForWorkspaceLocked(context.Background(), "ws-1")
+			return err
+		})
 		done <- result{err: err}
 	}()
 

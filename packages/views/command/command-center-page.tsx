@@ -232,7 +232,7 @@ function AgentsTab({ envelope }: { envelope: Envelope }) {
               {agents.nodes.map((n) => (
                 <li key={n.id} className="flex items-center gap-2">
                   <span className="text-foreground font-medium">{n.label}</span>
-                  <span className="text-muted-foreground/60">{n.kind}</span>
+                  <span className="text-muted-foreground">{n.kind}</span>
                   <Badge variant="outline" className="text-[10px] ml-auto">{n.status}</Badge>
                 </li>
               ))}
@@ -322,7 +322,7 @@ export function CommandCenterPage() {
       <div className="flex-1 overflow-auto p-4">
         {error && !envelope && (
           <div className="flex flex-col items-center gap-3 py-20 text-sm text-muted-foreground">
-            <AlertCircle className="h-8 w-8 text-muted-foreground/40" />
+            <AlertCircle className="h-8 w-8 text-faint-foreground" />
             <p>Claud-ometer is not reachable at <code>localhost:3005</code></p>
             <p className="text-xs">
               Start it with <code>cd ~/Code/Claud-ometer && npm run dev</code>
