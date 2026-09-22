@@ -5,7 +5,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgtype"
+
 	"github.com/multica-ai/multica/server/internal/testutil"
+	db "github.com/multica-ai/multica/server/pkg/db/generated"
 )
 
 // DOS-1042: GetTaskStatus already gets polled every ~5s for every in-flight
@@ -88,5 +91,66 @@ func TestTaskToResponse_SurfacesLastHeartbeatAt(t *testing.T) {
 	resp := taskToResponse(task, testWorkspaceID)
 	if resp.LastHeartbeatAt == nil {
 		t.Fatal("taskToResponse dropped last_heartbeat_at")
+	}
+}
+
+// TestListStaleRunningAgentTasks pins the real query the heartbeat column
+// exists to serve: a caller (Hellsing, an ops surface) decides its own
+// staleness threshold and asks for exactly the running tasks older than it.
+func TestListStaleRunningAgentTasks(t *testing.T) {
+	runtimeID := dbfx.Runtime(t, "DOS-1042 stale-list runtime")
+	agentID := dbfx.Agent(t, "DOS-1042 stale-list agent", runtimeID)
+
+	staleID := dbfx.Task(t, agentID, testutil.Cols{
+		"runtime_id": runtimeID, "status": "running",
+		"started_at": testutil.Raw("now() - interval '1 hour'"),
+	})
+	dbfx.Exec(t, `UPDATE agent_task_queue SET last_heartbeat_at = now() - interval '1 hour' WHERE id = $1`, staleID)
+
+	freshID := dbfx.Task(t, agentID, testutil.Cols{
+		"runtime_id": runtimeID, "status": "running",
+		"started_at": testutil.Raw("now() - interval '1 hour'"),
+	})
+	dbfx.Exec(t, `UPDATE agent_task_queue SET last_heartbeat_at = now() WHERE id = $1`, freshID)
+
+	// No heartbeat yet at all -- falls back to started_at, which here is old
+	// enough to still count as stale (e.g. a row that predates this column,
+	// or a genuinely hung task that never got its first poll).
+	noHeartbeatStaleID := dbfx.Task(t, agentID, testutil.Cols{
+		"runtime_id": runtimeID, "status": "running",
+		"started_at": testutil.Raw("now() - interval '1 hour'"),
+	})
+
+	// Stale by heartbeat age, but not running -- must be excluded regardless.
+	completedID := dbfx.Task(t, agentID, testutil.Cols{
+		"runtime_id": runtimeID, "status": "completed",
+		"started_at": testutil.Raw("now() - interval '1 hour'"), "completed_at": testutil.Raw("now()"),
+	})
+	dbfx.Exec(t, `UPDATE agent_task_queue SET last_heartbeat_at = now() - interval '1 hour' WHERE id = $1`, completedID)
+
+	staleBefore := time.Now().Add(-10 * time.Minute)
+	rows, err := testHandler.Queries.ListStaleRunningAgentTasks(t.Context(), db.ListStaleRunningAgentTasksParams{
+		WorkspaceID: parseUUID(testWorkspaceID),
+		StaleBefore: pgtype.Timestamptz{Time: staleBefore, Valid: true},
+	})
+	if err != nil {
+		t.Fatalf("ListStaleRunningAgentTasks: %v", err)
+	}
+
+	got := make(map[string]bool, len(rows))
+	for _, r := range rows {
+		got[uuidToString(r.ID)] = true
+	}
+	if !got[staleID] {
+		t.Errorf("stale running task missing from results")
+	}
+	if !got[noHeartbeatStaleID] {
+		t.Errorf("running task with no heartbeat but old started_at missing from results")
+	}
+	if got[freshID] {
+		t.Errorf("fresh running task incorrectly returned as stale")
+	}
+	if got[completedID] {
+		t.Errorf("completed task incorrectly returned despite an old heartbeat")
 	}
 }

@@ -722,6 +722,20 @@ UPDATE agent_task_queue
 SET last_heartbeat_at = now()
 WHERE id = $1 AND status = 'running';
 
+-- name: ListStaleRunningAgentTasks :many
+-- The real consumer of idx_agent_task_queue_heartbeat (migration 535):
+-- running tasks whose liveness signal (or, for a task with none yet --
+-- either genuinely brand new, or a row that predates this column -- its
+-- started_at) is older than the caller's own staleness threshold. No
+-- threshold is hardcoded here deliberately: a poll-interval-aware caller
+-- (Hellsing, an ops surface) decides what "stale" means for its own use,
+-- rather than this query guessing a universal constant.
+SELECT atq.* FROM agent_task_queue atq
+JOIN agent a ON a.id = atq.agent_id
+WHERE a.workspace_id = $1
+  AND atq.status = 'running'
+  AND COALESCE(atq.last_heartbeat_at, atq.started_at) < sqlc.arg(stale_before)::timestamptz;
+
 -- name: GetAgentTaskForDelegatedFailureUpdate :one
 -- Serializes the idempotent delegated-failure recovery signal for one failed
 -- task. FailTask and the stale-task sweepers can converge on the same row; the
