@@ -7,10 +7,6 @@ export default defineConfig({
   resolve: {
     alias: {
       "@": resolve(__dirname, "src/renderer/src"),
-      "@claud-ometer/envelope": resolve(
-        __dirname,
-        "../../../Claud-ometer/src/lib/command/envelope.ts",
-      ),
     },
   },
   test: {

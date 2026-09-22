@@ -124,7 +124,6 @@ type NavKey =
   | "usage"
   | "runtimes"
   | "skills"
-  | "command"
   | "settings"
   | "approvals";
 
@@ -142,7 +141,6 @@ type NavLabelKey =
   | "usage"
   | "runtimes"
   | "skills"
-  | "command"
   | "settings"
   | "approvals";
 
@@ -171,7 +169,6 @@ const aiTeamNav: { key: NavKey; labelKey: NavLabelKey }[] = [
 
 const utilityNav: { key: NavKey; labelKey: NavLabelKey }[] = [
   { key: "usage", labelKey: "usage" },
-  { key: "command", labelKey: "command" },
   { key: "settings", labelKey: "settings" },
 ];
 

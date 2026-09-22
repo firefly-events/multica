@@ -28,9 +28,6 @@
     "paths": {
       "@/*": [
         "./*"
-      ],
-      "@claud-ometer/envelope": [
-        "../../../Claud-ometer/src/lib/command/envelope.ts"
       ]
     },
     "noEmit": true,

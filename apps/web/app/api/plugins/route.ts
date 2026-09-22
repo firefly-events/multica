@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { readdir, readFile } from "fs/promises";
+import type { Dirent } from "fs";
 import { join } from "path";
 import { homedir } from "os";
 
@@ -8,7 +9,7 @@ import { homedir } from "os";
 export async function GET() {
   const pluginsDir = join(homedir(), ".multica", "plugins");
 
-  let entries: Awaited<ReturnType<typeof readdir>>;
+  let entries: Dirent<string>[];
   try {
     entries = await readdir(pluginsDir, { withFileTypes: true });
   } catch {

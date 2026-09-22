@@ -41,7 +41,6 @@ export type RouteIconName =
   | "FileAudio"
   | "FileVideo"
   | "FileQuestion"
-  | "Radar"
   | "ShieldCheck";
 
 /** i18n label key (under the `layout.nav` namespace) for a page. */
@@ -58,7 +57,6 @@ export type NavLabelKey =
   | "runtimes"
   | "skills"
   | "settings"
-  | "command"
   | "approvals";
 
 /** Stable identifier for each workspace navigation page. */
@@ -75,7 +73,6 @@ export type WorkspacePageKey =
   | "runtimes"
   | "skills"
   | "settings"
-  | "command"
   | "approvals";
 
 export interface WorkspacePage {
@@ -104,7 +101,6 @@ export const WORKSPACE_PAGES: Record<WorkspacePageKey, WorkspacePage> = {
   runtimes: { segment: "runtimes", icon: "Monitor", navKey: "runtimes" },
   skills: { segment: "skills", icon: "BookOpenText", navKey: "skills" },
   settings: { segment: "settings", icon: "Settings", navKey: "settings" },
-  command: { segment: "command", icon: "Radar", navKey: "command" },
   approvals: { segment: "approvals", icon: "ShieldCheck", navKey: "approvals" },
 };
 

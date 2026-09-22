@@ -80,7 +80,6 @@ const WORKSPACE_ROUTES: readonly RoutePattern[] = [
   ["skills", ":id"],
   ["settings"],
   ["attachments", ":id", "preview"],
-  ["command"],
   ["approvals"],
 ];
 

@@ -20,7 +20,6 @@ import {
   FileAudio,
   FileVideo,
   FileQuestion,
-  Radar,
   ShieldCheck,
   type LucideIcon,
 } from "lucide-react";
@@ -55,7 +54,6 @@ export const ROUTE_ICON_COMPONENTS: Record<RouteIconName, LucideIcon> = {
   FileAudio,
   FileVideo,
   FileQuestion,
-  Radar,
   ShieldCheck,
 };
 

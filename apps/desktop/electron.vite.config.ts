@@ -28,9 +28,6 @@ export default defineConfig({
     resolve: {
       alias: {
         "@": resolve("src/renderer/src"),
-        "@claud-ometer/envelope": resolve(
-          "../../../Claud-ometer/src/lib/command/envelope.ts",
-        ),
       },
       dedupe: ["react", "react-dom", "@tanstack/react-query"],
     },
