@@ -624,6 +624,7 @@
     "hide_past": "隐藏历史运行（{{count}}）",
     "cancel_task_tooltip": "取消运行",
     "cancel_task_aria": "取消运行",
+    "heartbeat_stale_tooltip": "守护进程已超过 30 秒未更新 — 此次运行可能已卡住",
     "retry_task_tooltip": "重试运行",
     "retry_task_aria": "重试运行",
     "retry_failed": "重试运行失败",

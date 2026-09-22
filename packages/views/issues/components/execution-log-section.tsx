@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { ChevronRight, Loader2, RotateCcw, Square } from "lucide-react";
+import { AlertTriangle, ChevronRight, Loader2, RotateCcw, Square } from "lucide-react";
 import { toast } from "sonner";
 import { api, dispatchReasonCode } from "@multica/core/api";
 import { issueTasksOptions } from "@multica/core/issues/queries";
@@ -297,6 +297,26 @@ const STATUS_TONE: Record<AgentTask["status"], string> = {
 
 // ─── Active row ────────────────────────────────────────────────────────────
 
+// DOS-1042: the daemon polls the server for this task's status roughly
+// every 5s while it runs; the server stamps last_heartbeat_at on that same
+// request. 30s (6 missed polls) tolerates real network jitter and a brief
+// server hiccup without flagging a genuinely healthy task -- a caller-
+// chosen threshold, by design (see ListStaleRunningAgentTasks server-side,
+// which deliberately takes no hardcoded default either).
+const TASK_HEARTBEAT_STALE_MS = 30_000;
+
+// Same fallback order the server-side query uses (COALESCE(last_heartbeat_at,
+// started_at)): a running task with no heartbeat yet is either brand new
+// (not stale) or predates this field (judge it by how long it's been
+// running instead).
+function isTaskHeartbeatStale(task: AgentTask, nowMs: number): boolean {
+  if (task.status !== "running") return false;
+  const baseline =
+    task.last_heartbeat_at ?? task.started_at ?? task.dispatched_at ?? task.created_at;
+  if (!baseline) return false;
+  return nowMs - new Date(baseline).getTime() > TASK_HEARTBEAT_STALE_MS;
+}
+
 // One active (running / queued / dispatched / parked) task row. Running rows
 // keep status to a single live elapsed timer; transcript and stop stay available
 // as hover actions. Transcript content lazy-loads on click via TranscriptButton,
@@ -332,6 +352,7 @@ export function ActiveTaskRow({
           now,
         )
       : "";
+  const heartbeatStale = isTaskHeartbeatStale(task, now);
 
   // Transcript only meaningful once messages exist — pure-queued and
   // waiting_local_directory tasks haven't streamed any agent output yet.
@@ -368,7 +389,25 @@ export function ActiveTaskRow({
       <RowStatus title={label}>
         {task.status === "running" ? (
           <>
-            <span className="text-info tabular-nums">{elapsed}</span>
+            {heartbeatStale && (
+              <Tooltip>
+                <TooltipTrigger
+                  render={
+                    <AlertTriangle
+                      role="img"
+                      aria-label={t(($) => $.execution_log.heartbeat_stale_tooltip)}
+                    />
+                  }
+                  className="h-3.5 w-3.5 shrink-0 text-warning"
+                />
+                <TooltipContent>
+                  {t(($) => $.execution_log.heartbeat_stale_tooltip)}
+                </TooltipContent>
+              </Tooltip>
+            )}
+            <span className={`tabular-nums ${heartbeatStale ? "text-warning" : "text-info"}`}>
+              {elapsed}
+            </span>
             <span className="sr-only">{label}</span>
           </>
         ) : (

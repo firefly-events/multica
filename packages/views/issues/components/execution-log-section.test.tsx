@@ -88,6 +88,69 @@ describe("ActiveTaskRow", () => {
     expect(screen.getByText("View transcript")).toBeInTheDocument();
     expect(mockState.taskMessagesOptions).not.toHaveBeenCalled();
   });
+
+  // DOS-1042 / stale-heartbeat indicator. System time is fixed at
+  // 2026-06-08T08:05:04Z (see beforeEach); started_at defaults to
+  // 08:00:00Z, five minutes prior, so a task with no last_heartbeat_at
+  // falls back to started_at and IS stale by default -- these tests are
+  // deliberate about last_heartbeat_at rather than relying on that default.
+  it("shows no stale indicator when the heartbeat is recent", () => {
+    renderWithI18n(
+      <ActiveTaskRow
+        task={makeTask({ last_heartbeat_at: "2026-06-08T08:05:00Z" })}
+        issueId="issue-1"
+      />,
+    );
+
+    expect(screen.queryByRole("img", { name: /may be stuck/i })).not.toBeInTheDocument();
+  });
+
+  it("shows a stale indicator when the heartbeat is over 30s old", () => {
+    renderWithI18n(
+      <ActiveTaskRow
+        task={makeTask({ last_heartbeat_at: "2026-06-08T08:04:00Z" })}
+        issueId="issue-1"
+      />,
+    );
+
+    expect(screen.getByRole("img", { name: /may be stuck/i })).toBeInTheDocument();
+  });
+
+  it("does not flag a just-started task with no heartbeat yet as stale", () => {
+    renderWithI18n(
+      <ActiveTaskRow
+        task={makeTask({
+          started_at: "2026-06-08T08:05:00Z",
+          last_heartbeat_at: undefined,
+        })}
+        issueId="issue-1"
+      />,
+    );
+
+    expect(screen.queryByRole("img", { name: /may be stuck/i })).not.toBeInTheDocument();
+  });
+
+  it("falls back to started_at when a task predates the heartbeat column", () => {
+    renderWithI18n(
+      <ActiveTaskRow
+        task={makeTask({ started_at: "2026-06-08T08:00:00Z", last_heartbeat_at: undefined })}
+        issueId="issue-1"
+      />,
+    );
+
+    expect(screen.getByRole("img", { name: /may be stuck/i })).toBeInTheDocument();
+  });
+
+  it("never shows the stale indicator for a non-running task", () => {
+    renderWithI18n(
+      <ActiveTaskRow
+        task={makeTask({ status: "queued", last_heartbeat_at: "2026-06-08T08:00:00Z" })}
+        issueId="issue-1"
+      />,
+    );
+
+    expect(screen.queryByRole("img", { name: /may be stuck/i })).not.toBeInTheDocument();
+  });
 });
 
 describe("TaskCommentCoverage", () => {

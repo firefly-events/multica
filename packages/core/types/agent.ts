@@ -324,6 +324,14 @@ export interface AgentTask {
   dispatched_at: string | null;
   started_at: string | null;
   completed_at: string | null;
+  // Per-task liveness (DOS-1042): stamped server-side on the daemon's
+  // existing ~5s GetTaskStatus poll, so it only ever advances while
+  // status === "running". Absent (not null) when the task never reached
+  // running, or predates this field -- the backend omits the key rather
+  // than sending null. Distinct from started_at: two running tasks with
+  // the same started_at can have very different last_heartbeat_at if one
+  // is genuinely stuck.
+  last_heartbeat_at?: string;
   result: unknown;
   error: string | null;
   // Empty string when the task is not in a failed state (the backend uses

@@ -624,6 +624,7 @@
     "hide_past": "이전 실행 숨기기 ({{count}})",
     "cancel_task_tooltip": "실행 취소",
     "cancel_task_aria": "실행 취소",
+    "heartbeat_stale_tooltip": "30초 이상 데몬으로부터 업데이트가 없습니다 — 이 실행이 멈췄을 수 있습니다",
     "retry_task_tooltip": "실행 다시 시도",
     "retry_task_aria": "실행 다시 시도",
     "retry_failed": "실행을 다시 시도하지 못했습니다",
