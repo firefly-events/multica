@@ -67,8 +67,17 @@ func tokenProbeTestAgent(t *testing.T, name, runtimeStatus string) (db.Agent, st
 // function's own doc comment: "an offline machine still queues, because that
 // wait ends by itself." A bare offline status (which is all our token-probe
 // feature currently writes via SetAgentRuntimeOffline -- see
-// TestApplyTokenProbeStatus below) is Waitable, not Blocked, so it now
-// correctly QUEUES on all three paths rather than being rejected. Real,
+// TestApplyTokenProbeStatus below) is Waitable, not Blocked -- but whether
+// that leniency actually lets a run through is NOT uniform across all three
+// callers. The direct AgentReadiness call (path 1) reports Ready()=false
+// either way, by design; it is only an input, not the skip decision itself.
+// autopilot admission (shouldSkipDispatch, paths 3 & 4) makes the real
+// decision, and deliberately scopes the "still queue" leniency to
+// create_issue only -- that mode writes a durable issue server-side, so the
+// run can wait for the runtime to come back. run_only has no such
+// placeholder: the work either runs now or it doesn't, so a Waitable-but-
+// currently-offline runtime still gets skipped there, same as a genuinely
+// Blocked one would. See shouldSkipDispatch's own comment for this. Real,
 // deliberately NOT fixed here: our token-probe feature has no way to signal
 // a CONFIRMED-bad-token as Blocked (it would need to write a structured
 // runtimeOfflineReason the way runtimeOfflineCodeNotExecutable/
@@ -163,11 +172,20 @@ func TestAgentReadiness_OfflineRuntimeStillQueuesOnAllThreeDispatchPaths(t *test
 			if err := json.NewDecoder(w.Body).Decode(&run); err != nil {
 				t.Fatalf("decode run: %v", err)
 			}
-			// REVISED (see the test's own top-level comment): an offline
-			// runtime is Waitable, not Blocked, so this must NOT be skipped
-			// -- it queues, same as the direct AgentReadiness call above.
-			if run.Status == "skipped" {
-				t.Fatalf("run status = %q; want it to queue (issue_created/running) since an offline runtime is Waitable, not Blocked", run.Status)
+			// shouldSkipDispatch's Waitable leniency (an offline runtime still
+			// queues) is deliberately scoped to create_issue only: that mode
+			// writes a durable issue server-side and the run can wait for the
+			// laptop to come back. run_only has no such placeholder -- the
+			// work either runs now or doesn't, so an offline/Waitable runtime
+			// still skips there, same as a genuinely Blocked one would.
+			if mode == "create_issue" {
+				if run.Status == "skipped" {
+					t.Fatalf("run status = %q; want it to queue (issue_created) since create_issue gives an offline (Waitable) runtime a durable placeholder to wait in", run.Status)
+				}
+			} else {
+				if run.Status != "skipped" {
+					t.Fatalf("run status = %q; want skipped since run_only has no placeholder for an offline runtime to wait in", run.Status)
+				}
 			}
 		})
 	}
