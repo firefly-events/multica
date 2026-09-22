@@ -647,6 +647,7 @@
     "hide_past": "Masquer les exécutions passées ({{count}})",
     "cancel_task_tooltip": "Annuler l'exécution",
     "cancel_task_aria": "Annuler l'exécution",
+    "heartbeat_stale_tooltip": "Aucune mise à jour du démon depuis plus de 30 s — cette exécution est peut-être bloquée",
     "retry_task_tooltip": "Relancer l'exécution",
     "retry_task_aria": "Relancer l'exécution",
     "retry_failed": "Échec de la relance de l'exécution",
