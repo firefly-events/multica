@@ -4985,6 +4985,18 @@ func (h *Handler) GetTaskStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Per-task liveness (DOS-1042): this request already happens every ~5s
+	// for every in-flight task (watchTaskCancellation on the daemon side) --
+	// piggyback the stamp here instead of adding a second round trip. Only
+	// meaningful while running (the query's own WHERE clause enforces this
+	// too); best-effort, since a heartbeat-write failure must never turn a
+	// successful status check into a failed one for the daemon.
+	if task.Status == "running" {
+		if err := h.Queries.TouchAgentTaskHeartbeat(r.Context(), taskUUID); err != nil {
+			slog.Warn("touch agent task heartbeat failed", "task_id", taskID, "error", err)
+		}
+	}
+
 	writeJSON(w, http.StatusOK, map[string]string{"status": task.Status})
 }
 
