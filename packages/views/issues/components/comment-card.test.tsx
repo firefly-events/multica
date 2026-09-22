@@ -27,6 +27,7 @@ vi.mock("../../navigation", () => ({
     back: vi.fn(),
     pathname: "/acme/issues",
     searchParams: new URLSearchParams(),
+    hash: "",
     openInNewTab: vi.fn(),
     getShareableUrl: (p: string) => `https://app.example${p}`,
   }),
@@ -84,5 +85,51 @@ describe("AttachmentList — standalone HTML attachment routes through Attachmen
     // AttachmentCard chrome would render the filename as visible <p> text;
     // HtmlAttachmentPreview replaces the row entirely.
     expect(screen.queryByText("report.html")).toBeNull();
+  });
+});
+
+describe("AttachmentList — inline attachment filtering", () => {
+  it("does not render a bottom attachment row when the body already has the stable file-card URL", () => {
+    const id = "11111111-2222-3333-4444-555555555555";
+    const href = `/api/attachments/${id}/download`;
+    const attachment = {
+      id,
+      url: "/uploads/report.pdf",
+      filename: "report.pdf",
+      content_type: "application/pdf",
+      size_bytes: 1024,
+    } as any;
+
+    const { container } = renderWithQuery(
+      <AttachmentList
+        attachments={[attachment]}
+        content={`!file[report.pdf](${href})`}
+      />,
+    );
+
+    expect(screen.queryByText("report.pdf")).toBeNull();
+    expect(container.firstChild).toBeNull();
+  });
+
+  it("does not render a bottom attachment row when the body already has the response download_url", () => {
+    const href = "https://cdn.example.test/report.pdf?Signature=stale";
+    const attachment = {
+      id: "11111111-2222-3333-4444-555555555555",
+      url: "/uploads/report.pdf",
+      download_url: "https://cdn.example.test/report.pdf?Signature=fresh",
+      filename: "report.pdf",
+      content_type: "application/pdf",
+      size_bytes: 1024,
+    } as any;
+
+    const { container } = renderWithQuery(
+      <AttachmentList
+        attachments={[attachment]}
+        content={`!file[report.pdf](${href})`}
+      />,
+    );
+
+    expect(screen.queryByText("report.pdf")).toBeNull();
+    expect(container.firstChild).toBeNull();
   });
 });

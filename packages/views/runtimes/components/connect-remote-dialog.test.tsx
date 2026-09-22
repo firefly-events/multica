@@ -1,6 +1,6 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { act, render, screen, waitFor } from "@testing-library/react";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { I18nProvider } from "@multica/core/i18n/react";
 import { configStore } from "@multica/core/config";
 import enCommon from "../../locales/en/common.json";
@@ -23,8 +23,14 @@ vi.mock("@multica/core/paths", () => ({
   useWorkspaceSlug: () => "workspace-test",
 }));
 
+const wsEventState = vi.hoisted(() => ({
+  handler: null as ((payload: unknown) => void) | null,
+}));
+
 vi.mock("@multica/core/realtime", () => ({
-  useWSEvent: vi.fn(),
+  useWSEvent: (_event: string, handler: (payload: unknown) => void) => {
+    wsEventState.handler = handler;
+  },
 }));
 
 vi.mock("../../navigation", () => ({
@@ -60,12 +66,11 @@ function renderDialog(config?: {
   );
 }
 
-const ligatureClasses = [
-  "[font-variant-ligatures:none]",
-  "[font-feature-settings:'liga'_0]",
-];
-
 describe("ConnectRemoteDialog", () => {
+  beforeEach(() => {
+    wsEventState.handler = null;
+  });
+
   it("uses cloud setup commands by default", () => {
     const { baseElement } = renderDialog();
 
@@ -96,23 +101,20 @@ describe("ConnectRemoteDialog", () => {
     );
   });
 
-  it("disables font ligatures in setup command code", () => {
+  it("transitions from setup instructions to the connected state", async () => {
     const { baseElement } = renderDialog();
 
-    const setupCode = Array.from(baseElement.querySelectorAll("code")).find((node) =>
-      node.textContent?.includes("multica setup"),
-    );
+    expect(baseElement).toHaveTextContent("multica setup");
+    act(() => {
+      wsEventState.handler?.({ runtime_id: "rt-test" });
+    });
 
-    expect(setupCode).toHaveClass(...ligatureClasses);
-  });
-
-  it("disables font ligatures in fallback token command code", () => {
-    const { baseElement } = renderDialog();
-
-    const tokenCode = Array.from(baseElement.querySelectorAll("code")).find((node) =>
-      node.textContent?.includes("multica login --token <YOUR_TOKEN>"),
-    );
-
-    expect(tokenCode).toHaveClass(...ligatureClasses);
+    await waitFor(() => {
+      expect(screen.getByText("Computer connected")).toBeInTheDocument();
+      expect(
+        screen.getByRole("button", { name: "Create an agent" }),
+      ).toBeInTheDocument();
+    });
+    expect(baseElement).not.toHaveTextContent("multica setup");
   });
 });

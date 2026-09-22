@@ -81,8 +81,8 @@ func TestFormatErrorAllKinds(t *testing.T) {
 	withLang(t, "") // default English
 	allKinds := []ErrorKind{
 		KindNetworkTimeout, KindNetworkDNS, KindNetworkRefused, KindNetworkTLS, KindNetworkOffline,
-		KindAuthRequired, KindForbidden, KindNotFound, KindConflict, KindValidation,
-		KindRateLimited, KindServerError, KindUnknown,
+		KindAuthRequired, KindTaskTokenRejected, KindForbidden, KindNotFound, KindConflict,
+		KindValidation, KindRateLimited, KindServerError, KindUnknown,
 	}
 	for _, lang := range []Language{LangEN, LangZH} {
 		for _, k := range allKinds {
@@ -130,6 +130,107 @@ func TestFormatErrorValidationUsesServerMessage(t *testing.T) {
 	got := FormatError(httpErr, false)
 	if !strings.Contains(got, "title is required") {
 		t.Errorf("expected server validation message surfaced, got %q", got)
+	}
+}
+
+// TestFormatErrorConflictUsesServerMessage pins GH #6264: a 409 body carries a
+// hand-written fix ("reply under this comment", "a skill with that name
+// exists"), and the generic conflict template actively misdirects by telling
+// the caller to retry. The server message must reach the user by default, with
+// no --debug required.
+func TestFormatErrorConflictUsesServerMessage(t *testing.T) {
+	withLang(t, "en_US.UTF-8")
+	httpErr := &HTTPError{
+		Method:     "POST",
+		Path:       "/api/issues/abc/comments",
+		StatusCode: 409,
+		Body:       `{"error":"parent_id 11111111-1111-1111-1111-111111111111 is not a comment this task may reply under; set parent_id (--parent) to 22222222-2222-2222-2222-222222222222 or a coalesced comment id"}`,
+	}
+	wrapped := fmt.Errorf("add comment: %w", httpErr)
+
+	got := FormatError(wrapped, false)
+	if !strings.Contains(got, "set parent_id (--parent) to 22222222-2222-2222-2222-222222222222") {
+		t.Errorf("expected server conflict message surfaced, got %q", got)
+	}
+	// The retry advice is what sent agents into multi-hour loops; it must not
+	// be what they see when the server already named the fix.
+	if strings.Contains(got, "Re-fetch the latest state") {
+		t.Errorf("generic retry template should be replaced by the server message, got %q", got)
+	}
+	if strings.Contains(got, "/api/issues/abc/comments") {
+		t.Errorf("user message leaked the request path: %q", got)
+	}
+}
+
+func TestFormatErrorConflictChineseLocale(t *testing.T) {
+	withLang(t, "zh_CN.UTF-8")
+	httpErr := &HTTPError{StatusCode: 409, Body: `{"error":"a skill with this name already exists"}`}
+	got := FormatError(httpErr, false)
+	if !strings.Contains(got, "请求冲突：") || !strings.Contains(got, "a skill with this name already exists") {
+		t.Errorf("expected Chinese conflict prefix with server message, got %q", got)
+	}
+}
+
+// TestFormatErrorConflictFallsBackToGenericTemplate is the safety half: only a
+// JSON body with a known message field is surfaced, so an HTML error page or a
+// proxy response never gets dumped at the user.
+func TestFormatErrorConflictFallsBackToGenericTemplate(t *testing.T) {
+	withLang(t, "en_US.UTF-8")
+	for _, body := range []string{
+		`<html><body>409 Conflict</body></html>`,
+		`{"code":"runtime_has_active_agents"}`,
+		``,
+	} {
+		got := FormatError(&HTTPError{StatusCode: 409, Body: body}, false)
+		if !strings.Contains(got, "Re-fetch the latest state") {
+			t.Errorf("body %q: expected generic conflict template, got %q", body, got)
+		}
+		if body != "" && strings.Contains(got, body) {
+			t.Errorf("body %q: raw body leaked into user message %q", body, got)
+		}
+	}
+}
+
+// TestExtractServerMessagePrefersProseOverMachineCode covers the endpoints that
+// put a stable code in "error" and the sentence in "message" (issue-table
+// cursor responses). The sentence is what helps a person.
+func TestExtractServerMessagePrefersProseOverMachineCode(t *testing.T) {
+	got := extractServerMessage(`{"error":"cursor_query_mismatch","message":"cursor does not belong to this table branch"}`)
+	if got != "cursor does not belong to this table branch" {
+		t.Errorf("expected the prose message, got %q", got)
+	}
+
+	// With no sentence available the code is still better than nothing.
+	if got := extractServerMessage(`{"error":"cursor_query_mismatch"}`); got != "cursor_query_mismatch" {
+		t.Errorf("expected the bare code as fallback, got %q", got)
+	}
+
+	// Prose in a language without ASCII spaces must not be mistaken for a code.
+	if got := extractServerMessage(`{"error":"该名称已被占用"}`); got != "该名称已被占用" {
+		t.Errorf("expected non-ASCII prose preserved, got %q", got)
+	}
+}
+
+// TestFormatErrorValidationPrefersProseOverMachineCode pins an intentional
+// behavior change that rides along with the conflict fix: the prose preference
+// lives in the shared extractor, so a 400/422 whose "error" holds a machine code
+// now shows its "message" instead of the code. Only the issue-table endpoints
+// are shaped this way and none of them is reachable from the CLI today, but the
+// change is deliberate and should fail loudly if someone reverts it by accident.
+func TestFormatErrorValidationPrefersProseOverMachineCode(t *testing.T) {
+	withLang(t, "en_US.UTF-8")
+	got := FormatError(&HTTPError{
+		StatusCode: 422,
+		Body:       `{"error":"unsupported_group","code":"group_kind_unsupported","message":"This group type is not supported."}`,
+	}, false)
+	if !strings.Contains(got, "This group type is not supported.") {
+		t.Errorf("expected the prose message, got %q", got)
+	}
+
+	// A validation body carrying only a code is unchanged.
+	only := FormatError(&HTTPError{StatusCode: 422, Body: `{"error":"title_is_required"}`}, false)
+	if !strings.Contains(only, "title_is_required") {
+		t.Errorf("code-only validation body should still surface the code, got %q", only)
 	}
 }
 
@@ -274,19 +375,20 @@ func withLang(t *testing.T, lang string) {
 
 func TestErrorKindString(t *testing.T) {
 	cases := map[ErrorKind]string{
-		KindNetworkTimeout: "network_timeout",
-		KindNetworkDNS:     "network_dns",
-		KindNetworkRefused: "network_refused",
-		KindNetworkTLS:     "network_tls",
-		KindNetworkOffline: "network_offline",
-		KindAuthRequired:   "auth_required",
-		KindForbidden:      "forbidden",
-		KindNotFound:       "not_found",
-		KindConflict:       "conflict",
-		KindValidation:     "validation",
-		KindRateLimited:    "rate_limited",
-		KindServerError:    "server_error",
-		KindUnknown:        "unknown",
+		KindNetworkTimeout:    "network_timeout",
+		KindNetworkDNS:        "network_dns",
+		KindNetworkRefused:    "network_refused",
+		KindNetworkTLS:        "network_tls",
+		KindNetworkOffline:    "network_offline",
+		KindAuthRequired:      "auth_required",
+		KindTaskTokenRejected: "task_token_rejected",
+		KindForbidden:         "forbidden",
+		KindNotFound:          "not_found",
+		KindConflict:          "conflict",
+		KindValidation:        "validation",
+		KindRateLimited:       "rate_limited",
+		KindServerError:       "server_error",
+		KindUnknown:           "unknown",
 	}
 	seen := map[string]ErrorKind{}
 	for k, want := range cases {
@@ -301,6 +403,78 @@ func TestErrorKindString(t *testing.T) {
 	// Out-of-range value gets a stable fallback rather than an empty string.
 	if got := ErrorKind(999).String(); got != "ErrorKind(999)" {
 		t.Errorf("unexpected fallback String(): %q", got)
+	}
+}
+
+// TestFormatErrorRejectedTaskTokenDoesNotSuggestAnotherCredential is GH #7522
+// in one assertion. The generic 401 copy tells the reader to run `multica
+// login` or ask an administrator for valid credentials. That is right for a
+// person and wrong for an agent: after its task token stopped working mid-run,
+// one read the daemon owner's profile PAT and kept working under the member's
+// identity. A 401 on a task token has to read as "stop", never as "find a
+// working credential".
+//
+// It must also not guess why the token was rejected. A terminal task is the
+// usual cause, but the same 401 covers a malformed token, one sent to the wrong
+// server, and one dropped by an unrelated cleanup — so a message that asserts
+// the task finished is a claim the CLI cannot make.
+//
+// The wiring — which requests are marked task-scoped in the first place — is
+// covered by TestHTTPErrorTaskScopedFollowsTheRequestNotTheClient, which drives
+// a real client instead of hand-building the error.
+func TestFormatErrorRejectedTaskTokenDoesNotSuggestAnotherCredential(t *testing.T) {
+	httpErr := &HTTPError{Method: "GET", Path: "/api/me", StatusCode: 401, TaskScoped: true}
+
+	for _, tc := range []struct {
+		lang    string
+		want    []string
+		refuted []string
+	}{
+		{"en_US.UTF-8",
+			[]string{"rejected", "no longer usable", "Stop here", "do not retry",
+				"do not fall back to a profile or member credential"},
+			// No sign-in advice, and no claim about a cause it cannot verify.
+			[]string{"multica login", "administrator", "cancelled", "finished", "terminal state"}},
+		{"zh_CN.UTF-8",
+			[]string{"已被拒绝", "不再可用", "不要重试", "不要改用 profile 或成员凭证"},
+			[]string{"multica login", "管理员", "已完成", "被取消", "终态"}},
+	} {
+		withLang(t, tc.lang)
+		got := FormatError(httpErr, false)
+		for _, sub := range tc.want {
+			if !strings.Contains(got, sub) {
+				t.Errorf("%s: %q missing %q", tc.lang, got, sub)
+			}
+		}
+		for _, sub := range tc.refuted {
+			if strings.Contains(got, sub) {
+				t.Errorf("%s: %q must not contain %q", tc.lang, got, sub)
+			}
+		}
+	}
+
+	// Glossary: an agent execution is `task` in Chinese; 任务 is the product
+	// entity a user files (an issue). Writing this message with 任务 would say
+	// the user's issue was rejected. See conventions.zh.mdx.
+	withLang(t, "zh_CN.UTF-8")
+	zh := FormatError(httpErr, false)
+	if strings.Contains(zh, "任务") {
+		t.Errorf("zh copy used 任务 for an agent execution; it must stay `task`: %q", zh)
+	}
+	if !strings.Contains(zh, "task") {
+		t.Errorf("zh copy dropped the `task` term entirely: %q", zh)
+	}
+
+	// A member 401 is unchanged: that really is an expired login.
+	withLang(t, "en_US.UTF-8")
+	member := FormatError(&HTTPError{Method: "GET", Path: "/api/me", StatusCode: 401}, false)
+	if !strings.Contains(member, "multica login") {
+		t.Errorf("a member 401 should still point at sign-in, got %q", member)
+	}
+
+	// Exit classification is unchanged — still an auth failure.
+	if got := ExitCodeFor(httpErr); got != ExitAuth {
+		t.Errorf("ExitCodeFor(rejected task token) = %d, want %d", got, ExitAuth)
 	}
 }
 
@@ -404,4 +578,35 @@ func TestUserMessageError(t *testing.T) {
 			t.Errorf("WithUserMessage(_, nil) should be nil")
 		}
 	})
+}
+
+// TestServerErrorCode pins the contract a command relies on when it opts a
+// specific refusal out of the generic kind-based copy.
+func TestServerErrorCode(t *testing.T) {
+	httpErr := func(body string) error {
+		return &HTTPError{Method: "POST", Path: "/x", StatusCode: 403, Body: body}
+	}
+	cases := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{"code present", httpErr(`{"error":"nope","code":"autopilot_trigger_no_originator"}`), "autopilot_trigger_no_originator"},
+		{"no code field", httpErr(`{"error":"nope"}`), ""},
+		{"empty body", httpErr(""), ""},
+		{"non-JSON body", httpErr("plain text refusal"), ""},
+		{"malformed JSON", httpErr(`{"code":`), ""},
+		// A server that put prose in `code` must not have it treated as an
+		// identifier a command can branch on.
+		{"prose in code", httpErr(`{"code":"You do not have access"}`), ""},
+		{"not an HTTP error", errors.New("local failure"), ""},
+		{"nil", nil, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := ServerErrorCode(tc.err); got != tc.want {
+				t.Errorf("ServerErrorCode() = %q, want %q", got, tc.want)
+			}
+		})
+	}
 }

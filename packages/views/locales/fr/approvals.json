@@ -1,0 +1,53 @@
+{
+  "page": {
+    "title": "Approbations",
+    "tagline": "Examinez et traitez les demandes d'approbation en attente."
+  },
+  "tabs": {
+    "pending": "En attente",
+    "history": "Historique"
+  },
+  "table": {
+    "action": "Action",
+    "requested_by": "Demandé par",
+    "requested_at": "Demandé le",
+    "mode": "Mode",
+    "decision": "Décision",
+    "resolved_at": "Résolu le",
+    "approver": "Approbateur"
+  },
+  "mode": {
+    "human-gate": "Validation humaine",
+    "agent-quorum": "Quorum d'agents",
+    "multi-agent-vote": "Vote multi-agents"
+  },
+  "action_dialog": {
+    "title_approve": "Approuver la demande",
+    "title_reject": "Rejeter la demande",
+    "approver_label": "Votre nom",
+    "approver_placeholder": "Entrez votre nom",
+    "note_label": "Note (facultatif)",
+    "note_placeholder": "Justification ou contexte…",
+    "confirm_approve": "Approuver",
+    "confirm_reject": "Rejeter",
+    "cancel": "Annuler"
+  },
+  "decision": {
+    "allowed": "Approuvé",
+    "denied": "Rejeté"
+  },
+  "empty": {
+    "pending_title": "Aucune approbation en attente",
+    "pending_body": "Les actions nécessitant une validation apparaîtront ici.",
+    "history_title": "Aucune décision enregistrée",
+    "history_body": "Les approbations résolues et leur historique apparaîtront ici."
+  },
+  "error": {
+    "load": "Impossible de charger les approbations.",
+    "submit": "Impossible de soumettre la décision.",
+    "retry": "Réessayer"
+  },
+  "badge": {
+    "pending": "En attente"
+  }
+}

@@ -14,9 +14,9 @@
  * Call sites:
  *   - extensions/file-card.tsx FileCardView (Tiptap NodeView)
  *   - extensions/image-view.tsx ImageView (Tiptap NodeView)
- *   - readonly-content.tsx (markdown img + fileCard div renderers)
+ *   - rich-content/rich-content.tsx (markdown img + fileCard div renderers,
+ *     serving Chat, Issue descriptions and Comments through one renderer)
  *   - issues/components/comment-card.tsx AttachmentList (standalone fallback)
- *   - common/markdown.tsx (chat / skill viewer Markdown wrapper)
  *
  * The component owns its own preview modal and download dispatcher — callers
  * just pass `attachment` and (for editor surfaces) optional editor chrome
@@ -38,6 +38,11 @@ import type { Attachment as AttachmentRecord } from "@multica/core/types";
 import { useT } from "../i18n";
 import { useAttachmentDownloadResolver } from "./attachment-download-context";
 import { useAttachmentPreview } from "./attachment-preview-modal";
+import { useImageSequencePreview } from "./image-sequence-context";
+import {
+  isObjectURL,
+  useResignedInlineMediaURL,
+} from "./hooks/use-inline-media-url";
 import { useDownloadAttachment } from "./use-download-attachment";
 import { AttachmentCard } from "./attachment-card";
 import { HtmlAttachmentPreview } from "./html-attachment-preview";
@@ -108,13 +113,14 @@ function normalize(
   input: AttachmentInput,
   resolve: (url: string) => AttachmentRecord | undefined,
   cdnDomain: string,
+  cdnSigned: boolean,
 ): Normalized {
   if (input.kind === "record") {
     return {
       filename: input.attachment.filename,
       contentType: input.attachment.content_type,
       url: absolutizeMediaURL(
-        pickInlineMediaURL(input.attachment, input.attachment.url, cdnDomain),
+        pickInlineMediaURL(input.attachment, input.attachment.url, cdnDomain, cdnSigned),
       ),
       attachmentId: input.attachment.id,
       record: input.attachment,
@@ -147,7 +153,7 @@ function normalize(
     // uploaded image URL stayed site-relative and Electron's renderer
     // origin (file://) couldn't load it.
     url: absolutizeMediaURL(
-      record ? pickInlineMediaURL(record, input.url, cdnDomain) : input.url,
+      record ? pickInlineMediaURL(record, input.url, cdnDomain, cdnSigned) : input.url,
     ),
     attachmentId: record?.id,
     record,
@@ -230,17 +236,26 @@ function absolutizeMediaURL(rawUrl: string): string {
 //     directly (public CDN, or CloudFront cookie mode). Prefer it over
 //     an API-shaped `markdown_url` so the rendered `<img src>` and Copy
 //     Link affordance expose the CDN URL while the persisted markdown
-//     can remain the stable attachment endpoint.
-//  3. `record.markdown_url` — the durable, server-policy-aligned URL.
+//     can remain the stable attachment endpoint. Skipped when the server
+//     reports `cdn_signed` — in CloudFront signed-URL mode the same
+//     domain serves PRIVATE content and a raw (unsigned) storage URL is
+//     a guaranteed 403 (MUL-3254).
+//  3. Local disk `record.url` — self-host LocalStorage without
+//     LOCAL_UPLOAD_BASE_URL stores a site-relative `/uploads/...` path.
+//     It is the direct static object URL and is loadable once
+//     `absolutizeMediaURL` prefixes apiBaseUrl in split-origin clients.
+//  4. `record.markdown_url` — the durable, server-policy-aligned URL.
 //     Beats raw `record.url` because it never points at a private
-//     bucket (must-fix 2 from MUL-3192 review).
-//  4. `record.url` — legacy fallback for responses that omit
+//     bucket (must-fix 2 from MUL-3192 review), except for the explicit
+//     site-relative local upload path above.
+//  5. `record.url` — legacy fallback for responses that omit
 //     `markdown_url` (a backend old enough to predate MUL-3192).
-//  5. The input URL — when there's no record at all.
+//  6. The input URL — when there's no record at all.
 function pickInlineMediaURL(
   record: AttachmentRecord,
   fallback: string,
   cdnDomain: string,
+  cdnSigned: boolean,
 ): string {
   const dl = record.download_url ?? "";
   if (
@@ -249,10 +264,17 @@ function pickInlineMediaURL(
   ) {
     return dl;
   }
-  if (storageURLMatchesCdnDomain(record.url, cdnDomain)) return record.url;
+  if (!cdnSigned && storageURLMatchesCdnDomain(record.url, cdnDomain)) return record.url;
+  if (isSiteRelativeLocalUploadURL(record.url)) return record.url;
   if (record.markdown_url) return record.markdown_url;
   if (record.url) return record.url;
   return fallback;
+}
+
+function isSiteRelativeLocalUploadURL(rawURL: string): boolean {
+  if (!rawURL || !rawURL.startsWith("/")) return false;
+  const path = rawURL.split(/[?#]/, 1)[0] ?? "";
+  return path === "/uploads" || path.startsWith("/uploads/");
 }
 
 function storageURLMatchesCdnDomain(rawURL: string, cdnDomain: string): boolean {
@@ -298,10 +320,12 @@ export function Attachment({
 }: AttachmentProps) {
   const { resolveAttachment, openByUrl } = useAttachmentDownloadResolver();
   const cdnDomain = useConfigStore((s) => s.cdnDomain);
+  const cdnSigned = useConfigStore((s) => s.cdnSigned);
   const download = useDownloadAttachment();
   const preview = useAttachmentPreview();
+  const sequence = useImageSequencePreview();
 
-  const state = normalize(attachment, resolveAttachment, cdnDomain);
+  const state = normalize(attachment, resolveAttachment, cdnDomain, cdnSigned);
   const forceKind =
     attachment.kind === "url" ? attachment.forceKind : undefined;
   const kind =
@@ -309,23 +333,54 @@ export function Attachment({
     (state.filename || state.contentType
       ? getPreviewKind(state.contentType, state.filename)
       : null);
+  // The picked URL may still be the auth-gated API endpoint (reopened drafts
+  // whose persisted record has no signed download_url). Upgrade it to a
+  // freshly signed URL on clients that can't load the endpoint natively, or —
+  // on deployments that have no signed URL to give — to an object URL built
+  // from the authenticated byte fetch. Only the image branch renders a native
+  // resource load, so only it opts into that byte fetch.
+  const mediaUrl = useResignedInlineMediaURL(
+    state.attachmentId,
+    state.url,
+    kind === "image",
+  );
+  // Object URLs are session-local, so anything that hands a URL to the user or
+  // to another surface keeps the durable pick instead.
+  const shareUrl = isObjectURL(mediaUrl) ? state.url : mediaUrl;
+
+  // Identity this image has in the surrounding surface's sequence: the
+  // attachment id once the URL resolves to a record, otherwise the URL exactly
+  // as written in the body — the same pair `collectImageSequence` keys on.
+  const sequenceKey =
+    state.attachmentId ?? (attachment.kind === "url" ? attachment.url : "");
 
   const openPreview = () => {
+    // Inside an issue / chat, an image opens the surface's shared viewer at
+    // its real position so the reader can page through the rest. Anything the
+    // sequence doesn't know — a composer's in-flight upload, a surface with no
+    // provider — falls through to the single-image preview below.
+    if (kind === "image" && sequence.openAt(sequenceKey)) return;
     if (state.record) {
       preview.tryOpen({
         kind: "full",
         attachment: {
           ...state.record,
-          download_url: state.url || state.record.download_url,
+          download_url: mediaUrl || state.record.download_url,
         },
       });
       return;
     }
-    if (state.url) {
+    if (mediaUrl) {
       preview.tryOpen({
         kind: "url",
-        url: state.url,
+        url: mediaUrl,
         filename: state.filename,
+        // This dispatcher has already decided what the slot is — from the
+        // call site's `forceKind`, or from a content-type the modal's
+        // URL-only source doesn't carry. Hand that answer over instead of
+        // letting the modal re-guess from `filename`, which for a body image
+        // is the markdown caption (MUL-7518).
+        forceKind: kind ?? undefined,
       });
     }
   };
@@ -335,14 +390,15 @@ export function Attachment({
       download(state.attachmentId);
       return;
     }
-    if (state.url) openByUrl(state.url);
+    if (shareUrl) openByUrl(shareUrl);
   };
 
   if (kind === "image") {
     return (
       <>
         <ImageAttachmentView
-          src={state.url}
+          src={mediaUrl}
+          linkUrl={shareUrl}
           alt={state.filename}
           uploading={state.uploading}
           width={state.width}
@@ -380,7 +436,7 @@ export function Attachment({
         filename={state.filename}
         contentType={state.contentType}
         attachmentId={state.attachmentId}
-        href={state.url || undefined}
+        href={shareUrl || undefined}
         uploading={state.uploading}
         onPreview={openPreview}
         onDownload={handleDownload}
@@ -403,6 +459,12 @@ export function Attachment({
 
 interface ImageAttachmentViewProps {
   src: string;
+  /**
+   * URL handed to the user by Copy Link. Splits from `src` only when `src` is
+   * a session-local object URL (proxy-mode byte fallback) — pasting a `blob:`
+   * URL anywhere outside this renderer resolves to nothing.
+   */
+  linkUrl: string;
   alt: string;
   uploading: boolean;
   width?: number;
@@ -417,6 +479,7 @@ interface ImageAttachmentViewProps {
 
 function ImageAttachmentView({
   src,
+  linkUrl,
   alt,
   uploading,
   width,
@@ -431,7 +494,7 @@ function ImageAttachmentView({
   const { t } = useT("editor");
 
   const handleCopyLink = async () => {
-    if (await copyText(src)) {
+    if (await copyText(linkUrl)) {
       toast.success(t(($) => $.image.link_copied));
     } else {
       toast.error(t(($) => $.image.copy_link_failed));

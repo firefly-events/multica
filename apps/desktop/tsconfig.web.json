@@ -15,9 +15,6 @@
     "paths": {
       "@/*": [
         "src/renderer/src/*"
-      ],
-      "@claud-ometer/envelope": [
-        "../../../Claud-ometer/src/lib/command/envelope.ts"
       ]
     }
   }

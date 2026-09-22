@@ -8,6 +8,27 @@
  */
 import type { InboxItem } from "@multica/core/types";
 
+function formatResetAt(value: string | undefined): string {
+  if (!value) return "";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  return new Intl.DateTimeFormat(undefined, {
+    dateStyle: "medium",
+    timeStyle: "short",
+  }).format(date);
+}
+
+export function getAutopilotQuotaBody(item: InboxItem): string | null {
+  if (item.type !== "autopilot_quota_exceeded") return item.body;
+  const details = item.details ?? {};
+  const resetAt = formatResetAt(details.reset_at);
+  if (!details.limit || !resetAt) return item.body;
+  if (details.autopilot_title) {
+    return `Autopilot “${details.autopilot_title}” was not started because this workspace has reached its limit of ${details.limit} runs for the current period. The allowance resets ${resetAt}.`;
+  }
+  return `This workspace has reached its limit of ${details.limit} autopilot runs for the current period. This execution was not started. The allowance resets ${resetAt}.`;
+}
+
 function singleLine(value: string | null | undefined): string {
   return (value ?? "").replace(/\s+/g, " ").trim();
 }
@@ -35,17 +56,55 @@ export function stripQuickCreatePrefix(
 
 export function getInboxDisplayTitle(item: InboxItem): string {
   const details = item.details ?? {};
+  // Mobile is English-only today. Mirror web's localized system-notice titles
+  // rather than exposing backend fallback copy that can include raw counts.
+  switch (item.type) {
+    case "autopilot_quota_exceeded":
+      return "Autopilot run limit reached";
+  }
   if (item.type === "quick_create_done") {
     const cleanedTitle = stripQuickCreatePrefix(item.title, details.identifier);
     if (cleanedTitle) return cleanedTitle;
     const prompt = singleLine(details.original_prompt);
     if (prompt) return prompt;
   }
-  if (item.type === "quick_create_failed") {
+  // Both non-success quick-create outcomes surface the user's original input
+  // as the row title. Mirrors isQuickCreateOutcome in
+  // packages/views/inbox/components/inbox-display.ts.
+  if (item.type === "quick_create_failed" || item.type === "quick_create_unconfirmed") {
     const prompt = singleLine(details.original_prompt);
     if (prompt) return prompt;
   }
   return item.title;
+}
+
+export function getInboxNavigationTarget(
+  item: InboxItem,
+  workspace: string | null,
+  historyToken: string,
+) {
+  if (!workspace) return null;
+  if (item.issue_id) {
+    return {
+      pathname: "/[workspace]/issue/[id]" as const,
+      params: {
+        workspace,
+        id: item.issue_id,
+        highlight: item.details?.comment_id,
+        h: historyToken,
+      },
+    };
+  }
+  if (
+    item.type === "autopilot_quota_exceeded" ||
+    item.type === "autopilot_paused"
+  ) {
+    return {
+      pathname: "/[workspace]/inbox/[id]" as const,
+      params: { workspace, id: item.id },
+    };
+  }
+  return null;
 }
 
 /**
@@ -62,7 +121,9 @@ export function getInboxDisplayTitle(item: InboxItem): string {
  *   2. Group by `issue_id` (fall back to `id` for items with no issue
  *      attached — e.g. quick_create_failed).
  *   3. In each group, keep the newest by `created_at`.
- *   4. Sort the result newest-first.
+ *   4. Preserve the newest grouped `comment_id` anchor when the newest row
+ *      is a later status/metadata event for the same issue.
+ *   5. Sort the result newest-first.
  */
 export function deduplicateInboxItems(items: InboxItem[]): InboxItem[] {
   const active = items.filter((i) => !i.archived);
@@ -79,7 +140,22 @@ export function deduplicateInboxItems(items: InboxItem[]): InboxItem[] {
       (a, b) =>
         new Date(b.created_at).getTime() - new Date(a.created_at).getTime(),
     );
-    if (group[0]) merged.push(group[0]);
+    const newest = group[0];
+    if (!newest) continue;
+
+    const commentId =
+      newest.details?.comment_id ??
+      group.find((item) => item.details?.comment_id)?.details?.comment_id;
+
+    if (commentId && newest.details?.comment_id !== commentId) {
+      merged.push({
+        ...newest,
+        details: { ...(newest.details ?? {}), comment_id: commentId },
+      });
+      continue;
+    }
+
+    merged.push(newest);
   }
   return merged.sort(
     (a, b) =>
