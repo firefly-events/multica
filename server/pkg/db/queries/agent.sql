@@ -712,6 +712,16 @@ FROM agent_task_queue atq
 JOIN agent a ON a.id = atq.agent_id
 WHERE atq.id = $1;
 
+-- name: TouchAgentTaskHeartbeat :exec
+-- Stamps the per-task liveness signal. Called from the same GetTaskStatus
+-- request the daemon already polls every ~5s for every in-flight task (see
+-- watchTaskCancellation) -- no new daemon-side call, no new schedule. Scoped
+-- to status='running' so a task that already went terminal between the
+-- daemon's status check and this write can't resurrect a stale heartbeat.
+UPDATE agent_task_queue
+SET last_heartbeat_at = now()
+WHERE id = $1 AND status = 'running';
+
 -- name: GetAgentTaskForDelegatedFailureUpdate :one
 -- Serializes the idempotent delegated-failure recovery signal for one failed
 -- task. FailTask and the stale-task sweepers can converge on the same row; the
