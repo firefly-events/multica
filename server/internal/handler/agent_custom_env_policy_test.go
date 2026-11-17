@@ -269,3 +269,150 @@ func TestRequireAllowedCustomEnv_AllowList(t *testing.T) {
 		t.Fatalf("claim filter kept %v", kept)
 	}
 }
+
+// pantheonClaudeAPIPins is what Pantheon sets: its runtime routes Claude API
+// credit-lane agents by custom_env CLAUDE_CONFIG_DIR, one directory per
+// credits account.
+const pantheonClaudeAPIPins = "CLAUDE_CONFIG_DIR=/home/node/.claude-api|/home/node/.claude-api-2"
+
+// withPinnedCustomEnvPolicy gives the shared test handler the Pantheon value
+// pins for the rest of the test.
+func withPinnedCustomEnvPolicy(t *testing.T) {
+	t.Helper()
+	policy, err := agentconfig.CustomEnvPolicy{}.WithAllowedValues(pantheonClaudeAPIPins)
+	if err != nil {
+		t.Fatalf("policy: %v", err)
+	}
+	previous := testHandler.cfg.CustomEnvPolicy
+	testHandler.cfg.CustomEnvPolicy = policy
+	t.Cleanup(func() { testHandler.cfg.CustomEnvPolicy = previous })
+}
+
+// Without the pins the credit-lane key is refused (the rollout hazard the
+// setting exists for); with them only the two exact directories save.
+func TestCustomEnv_PinnedValueOnWritePaths(t *testing.T) {
+	if testHandler == nil {
+		t.Skip("database not available")
+	}
+	create := func(name string, env map[string]string) *httptest.ResponseRecorder {
+		req := newRequest(http.MethodPost, "/api/agents", map[string]any{
+			"name": name, "runtime_id": handlerTestRuntimeID(t), "custom_env": env,
+		})
+		w := httptest.NewRecorder()
+		testHandler.CreateAgent(w, req)
+		if w.Code == http.StatusCreated {
+			var created AgentResponse
+			if err := json.Unmarshal(w.Body.Bytes(), &created); err == nil {
+				t.Cleanup(func() { testPool.Exec(context.Background(), `DELETE FROM agent WHERE id = $1`, created.ID) })
+			}
+		}
+		return w
+	}
+
+	if w := create("Custom Env Pin Unset", map[string]string{"CLAUDE_CONFIG_DIR": "/home/node/.claude-api"}); w.Code != http.StatusBadRequest {
+		t.Fatalf("without pins: expected 400, got %d: %s", w.Code, w.Body.String())
+	}
+
+	withPinnedCustomEnvPolicy(t)
+
+	w := create("Custom Env Pin Create", map[string]string{"CLAUDE_CONFIG_DIR": "/home/node/.claude-api", "SLACK_WEBHOOK_URL": "u"})
+	if w.Code != http.StatusCreated {
+		t.Fatalf("pinned value: expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+	var created AgentResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &created); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got := readStoredCustomEnv(t, created.ID); got["CLAUDE_CONFIG_DIR"] != "/home/node/.claude-api" {
+		t.Fatalf("stored env = %v", got)
+	}
+
+	for _, value := range []string{"/home/node/.claude", "/home/node/.claude-api/", "/home/node/x/../.claude-api", "/home/node/.claude-api-22"} {
+		w := create("Custom Env Pin Refused "+value, map[string]string{"CLAUDE_CONFIG_DIR": value})
+		if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), agentconfig.CustomEnvClassValueNotPinned) {
+			t.Errorf("create with %q: expected 400 value_not_pinned, got %d: %s", value, w.Code, w.Body.String())
+		}
+		if strings.Contains(w.Body.String(), value) {
+			t.Errorf("error echoes the refused value %q: %s", value, w.Body.String())
+		}
+	}
+
+	update := func(env map[string]string) *httptest.ResponseRecorder {
+		req := withURLParam(newRequest(http.MethodPut, "/api/agents/"+created.ID+"/env", map[string]any{"custom_env": env}), "id", created.ID)
+		w := httptest.NewRecorder()
+		testHandler.UpdateAgentEnv(w, req)
+		return w
+	}
+	// The **** marker keeps the stored pinned value; it is checked as stored.
+	if w := update(map[string]string{"CLAUDE_CONFIG_DIR": envSentinel, "SLACK_WEBHOOK_URL": "v"}); w.Code != http.StatusOK {
+		t.Fatalf("update keeping the pinned value: expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	// Switching to the other credits account.
+	if w := update(map[string]string{"CLAUDE_CONFIG_DIR": "/home/node/.claude-api-2"}); w.Code != http.StatusOK {
+		t.Fatalf("update to the second pinned value: expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	for _, env := range []map[string]string{
+		{"CLAUDE_CONFIG_DIR": "/home/node/.claude-api-2/"},
+		{"CLAUDE_CONFIG_DIR": "/home/node/.claude-api-2/.."},
+		{"CLAUDE_CONFIG_DIR": "/home/node/.claude"},
+		{"CLAUDE_CONFIG_DIR": "/home/node/.claude-api", "CLAUDE_CODE_SHELL_PREFIX": "/home/node/.claude-api"},
+		{"CLAUDE_CONFIG_DIR": "/home/node/.claude-api", "CODEX_CONFIG_DIR": "/home/node/.claude-api"},
+		{"CLAUDE_CONFIG_DIR": "/home/node/.claude-api", "NODE_OPTIONS": "/home/node/.claude-api"},
+	} {
+		if w := update(env); w.Code != http.StatusBadRequest {
+			t.Errorf("update %v: expected 400, got %d: %s", env, w.Code, w.Body.String())
+		}
+	}
+	if got := readStoredCustomEnv(t, created.ID); !reflect.DeepEqual(got, map[string]string{"CLAUDE_CONFIG_DIR": "/home/node/.claude-api-2"}) {
+		t.Fatalf("refused updates changed the stored env: %v", got)
+	}
+}
+
+// At claim the pinned value reaches the runtime and any other value of the
+// same key (written straight to the database) is withheld.
+func TestClaimTaskByRuntime_PinnedCustomEnvValue(t *testing.T) {
+	if testHandler == nil || testPool == nil {
+		t.Skip("database not available")
+	}
+	withPinnedCustomEnvPolicy(t)
+	ctx := context.Background()
+	claim := func(label, customEnv string) map[string]string {
+		runtimeID := createClaimReclaimRuntime(t, ctx, label+" runtime")
+		agentID, issueID := createClaimReclaimAgentAndIssue(t, ctx, runtimeID, label+" agent")
+		if _, err := testPool.Exec(ctx, `UPDATE agent SET custom_env = $1 WHERE id = $2`, customEnv, agentID); err != nil {
+			t.Fatalf("seed custom_env: %v", err)
+		}
+		var taskID string
+		if err := testPool.QueryRow(ctx, `
+			INSERT INTO agent_task_queue (agent_id, runtime_id, issue_id, status, priority)
+			VALUES ($1, $2, $3, 'queued', 0)
+			RETURNING id
+		`, agentID, runtimeID, issueID).Scan(&taskID); err != nil {
+			t.Fatalf("create task: %v", err)
+		}
+		t.Cleanup(func() { testPool.Exec(context.Background(), `DELETE FROM agent_task_queue WHERE id = $1`, taskID) })
+		w := httptest.NewRecorder()
+		req := newDaemonTokenRequest("POST", "/api/daemon/runtimes/"+runtimeID+"/tasks/claim", nil, testWorkspaceID, label+"-daemon")
+		req = withURLParam(req, "runtimeId", runtimeID)
+		testHandler.ClaimTaskByRuntime(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("ClaimTaskByRuntime: expected 200, got %d: %s", w.Code, w.Body.String())
+		}
+		var resp struct {
+			Task *AgentTaskResponse `json:"task"`
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil || resp.Task == nil || resp.Task.Agent == nil {
+			t.Fatalf("decode claim (%v): %s", err, w.Body.String())
+		}
+		return resp.Task.Agent.CustomEnv
+	}
+
+	got := claim("custom-env-pin-ok", `{"CLAUDE_CONFIG_DIR":"/home/node/.claude-api-2","NODE_OPTIONS":"--inspect","SLACK_WEBHOOK_URL":"u"}`)
+	if !reflect.DeepEqual(got, map[string]string{"CLAUDE_CONFIG_DIR": "/home/node/.claude-api-2", "SLACK_WEBHOOK_URL": "u"}) {
+		t.Fatalf("claimed custom_env = %v; want the pinned value and SLACK_WEBHOOK_URL", got)
+	}
+	got = claim("custom-env-pin-bad", `{"CLAUDE_CONFIG_DIR":"/home/node/.claude-api/../.claude","SLACK_WEBHOOK_URL":"u"}`)
+	if !reflect.DeepEqual(got, map[string]string{"SLACK_WEBHOOK_URL": "u"}) {
+		t.Fatalf("claimed custom_env = %v; want the unpinned value withheld", got)
+	}
+}

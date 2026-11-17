@@ -195,13 +195,13 @@ func parseTrustedProxies(raw string) []netip.Prefix {
 // string hides the Help popover's version row instead of rendering
 // "Server version dev" for a local `go build`/`go run` or a self-hosted
 // `docker build` without --build-arg VERSION.
-// customEnvPolicyFromEnv reads MULTICA_AGENT_ENV_ALLOWED_KEYS. main refuses
-// to start on a bad value; a router built some other way (tests, tools) falls
+// customEnvPolicyFromEnv reads MULTICA_AGENT_ENV_ALLOWED_KEYS and
+// MULTICA_AGENT_ENV_ALLOWED_VALUES. main refuses to start on a bad value; a router built some other way (tests, tools) falls
 // back to refusing every key rather than to the floor alone.
 func customEnvPolicyFromEnv() agentconfig.CustomEnvPolicy {
 	policy, err := agentconfig.CustomEnvPolicyFromEnv()
 	if err != nil {
-		slog.Error("invalid "+agentconfig.CustomEnvAllowedKeysEnv+"; refusing every agent custom_env key", "error", err)
+		slog.Error("invalid "+agentconfig.CustomEnvAllowedKeysEnv+" or "+agentconfig.CustomEnvAllowedValuesEnv+"; refusing every agent custom_env key", "error", err)
 		return agentconfig.DenyAllCustomEnvPolicy()
 	}
 	return policy

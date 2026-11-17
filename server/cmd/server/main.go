@@ -322,12 +322,17 @@ func main() {
 		os.Exit(1)
 	}
 	if policy, err := agentconfig.CustomEnvPolicyFromEnv(); err != nil {
-		slog.Error("refusing to start: invalid "+agentconfig.CustomEnvAllowedKeysEnv, "error", err)
+		slog.Error("refusing to start: invalid "+agentconfig.CustomEnvAllowedKeysEnv+" or "+agentconfig.CustomEnvAllowedValuesEnv, "error", err)
 		os.Exit(1)
-	} else if policy.HasAllowList() {
-		slog.Info("agent custom_env: allow-list active", "setting", agentconfig.CustomEnvAllowedKeysEnv)
 	} else {
-		slog.Warn("agent custom_env: " + agentconfig.CustomEnvAllowedKeysEnv + " is not set; only the fixed deny floor applies")
+		if policy.HasAllowList() {
+			slog.Info("agent custom_env: allow-list active", "setting", agentconfig.CustomEnvAllowedKeysEnv)
+		} else {
+			slog.Warn("agent custom_env: " + agentconfig.CustomEnvAllowedKeysEnv + " is not set; only the fixed deny floor applies")
+		}
+		if pinned := policy.PinnedKeys(); len(pinned) > 0 {
+			slog.Info("agent custom_env: value-pinned keys", "setting", agentconfig.CustomEnvAllowedValuesEnv, "keys", pinned)
+		}
 	}
 	if os.Getenv("JWT_SECRET") == "" {
 		slog.Warn("JWT_SECRET is not set — using insecure dev default (allowed only because APP_ENV is not production).")

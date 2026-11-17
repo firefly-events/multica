@@ -132,7 +132,7 @@ The server refuses keys that could change how the run itself behaves. Saving a s
 - credentials: `*_TOKEN`, `*_KEY`, `*_SECRET`, `*_PASSWORD`, `AWS_*`;
 - AI coding tool settings: `ANTHROPIC_*`, `CLAUDE_*`, `CODEX_*`, `OPENAI_*`, `GEMINI_*`, `HERMES_*`, `CURSOR_*` and the other supported tools' prefixes.
 
-Log the AI coding tool in on the runtime's machine instead of passing its credential here. A self-hosted server can also restrict keys to an allow-list; see [environment variables](/environment-variables#agent-environment-variables). A key saved before this rule existed is withheld from runs, and the variables cannot be saved again until it is removed.
+Log the AI coding tool in on the runtime's machine instead of passing its credential here. A self-hosted server can also restrict keys to an allow-list, or accept a refused key such as `CLAUDE_CONFIG_DIR` only with exact values its operator lists; see [environment variables](/environment-variables#agent-environment-variables). A key saved before this rule existed is withheld from runs, and the variables cannot be saved again until it is removed.
 
 ## Custom arguments and MCP
 

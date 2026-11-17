@@ -16,6 +16,17 @@ import (
 // fixed deny floor below applies.
 const CustomEnvAllowedKeysEnv = "MULTICA_AGENT_ENV_ALLOWED_KEYS"
 
+// CustomEnvAllowedValuesEnv names the server setting that pins exact values
+// for keys the floor would otherwise refuse. Its value is a `;`-separated list
+// of KEY=VALUE|VALUE entries, for example
+// "CLAUDE_CONFIG_DIR=/home/node/.claude-api|/home/node/.claude-api-2". A
+// pinned key is accepted only when its value is byte-for-byte one of the
+// listed values; any other value is refused as before. Only the config
+// redirect and agent CLI classes can be pinned: an entry for a key that runs
+// code, redirects network traffic, changes TLS trust, carries a credential,
+// is daemon-owned or is not a valid name stops the server from starting.
+const CustomEnvAllowedValuesEnv = "MULTICA_AGENT_ENV_ALLOWED_VALUES"
+
 // Custom_env key classes. They name why a key is refused, so an operator
 // reading a 400 or a log line knows what the key would have done.
 const (
@@ -28,6 +39,7 @@ const (
 	CustomEnvClassCredential      = "credential"
 	CustomEnvClassAgentCLI        = "agent_cli"
 	CustomEnvClassNotAllowed      = "not_in_allow_list"
+	CustomEnvClassValueNotPinned  = "value_not_pinned"
 )
 
 // customEnvClassReason is the human half of each class, used in error text.
@@ -41,6 +53,20 @@ var customEnvClassReason = map[string]string{
 	CustomEnvClassCredential:      "it carries or selects a credential",
 	CustomEnvClassAgentCLI:        "it steers the agent CLI's account, model endpoint, headers or config",
 	CustomEnvClassNotAllowed:      "it is not on this server's " + CustomEnvAllowedKeysEnv + " list",
+	CustomEnvClassValueNotPinned:  "its value is not one of the values this server's " + CustomEnvAllowedValuesEnv + " pins for it",
+}
+
+// customEnvUnpinnableClasses are the floor classes no value pin can open. A
+// key in any of them can run code, move traffic, change trust, carry a secret
+// or override the daemon whatever its value looks like, so pinning a value
+// does not make it safe.
+var customEnvUnpinnableClasses = map[string]struct{}{
+	CustomEnvClassName:            {},
+	CustomEnvClassReserved:        {},
+	CustomEnvClassCodeExecution:   {},
+	CustomEnvClassNetworkRedirect: {},
+	CustomEnvClassTLSTrust:        {},
+	CustomEnvClassCredential:      {},
 }
 
 // customEnvNamePattern is the POSIX portable name: letters, digits and
@@ -162,31 +188,49 @@ func (e *CustomEnvError) Error() string {
 // CustomEnvFloorClass returns the floor class that refuses key, or "" when the
 // floor admits it. The floor applies whatever the allow-list says.
 func CustomEnvFloorClass(key string) string {
-	if !customEnvNamePattern.MatchString(key) {
-		return CustomEnvClassName
+	if classes := customEnvFloorClasses(key); len(classes) > 0 {
+		return classes[0]
 	}
+	return ""
+}
+
+// customEnvFloorClasses returns every floor class that refuses key, in floor
+// order. A key can match several (OTEL_CONFIG_DIR is a config redirect and a
+// network redirect); a value pin needs all of them to be pinnable.
+func customEnvFloorClasses(key string) []string {
+	if !customEnvNamePattern.MatchString(key) {
+		return []string{CustomEnvClassName}
+	}
+	var classes []string
 	if IsDaemonReservedEnvKey(key) {
-		return CustomEnvClassReserved
+		classes = append(classes, CustomEnvClassReserved)
 	}
 	upper := strings.ToUpper(key)
 	for _, rule := range customEnvFloor {
-		for _, exact := range rule.exact {
-			if upper == exact {
-				return rule.class
-			}
-		}
-		for _, prefix := range rule.prefixes {
-			if strings.HasPrefix(upper, prefix) {
-				return rule.class
-			}
-		}
-		for _, suffix := range rule.suffixes {
-			if strings.HasSuffix(upper, suffix) {
-				return rule.class
-			}
+		if customEnvRuleMatches(rule, upper) {
+			classes = append(classes, rule.class)
 		}
 	}
-	return ""
+	return classes
+}
+
+func customEnvRuleMatches(rule customEnvRule, upper string) bool {
+	for _, exact := range rule.exact {
+		if upper == exact {
+			return true
+		}
+	}
+	for _, prefix := range rule.prefixes {
+		if strings.HasPrefix(upper, prefix) {
+			return true
+		}
+	}
+	for _, suffix := range rule.suffixes {
+		if strings.HasSuffix(upper, suffix) {
+			return true
+		}
+	}
+	return false
 }
 
 // CustomEnvPolicy is the one rule for which keys an agent's custom_env may
@@ -199,6 +243,9 @@ type CustomEnvPolicy struct {
 	allowExact    map[string]struct{}
 	allowPrefixes []string
 	denyAll       bool
+	// pinnedValues maps an exact key name (case-sensitive) to the only values
+	// it may hold. See CustomEnvAllowedValuesEnv.
+	pinnedValues map[string]map[string]struct{}
 }
 
 // NewCustomEnvPolicy parses an allow-list spec (see CustomEnvAllowedKeysEnv).
@@ -243,9 +290,110 @@ func NewCustomEnvPolicy(spec string) (CustomEnvPolicy, error) {
 	return p, nil
 }
 
-// CustomEnvPolicyFromEnv reads CustomEnvAllowedKeysEnv from the process env.
+// WithAllowedValues returns p with the value pins of spec (see
+// CustomEnvAllowedValuesEnv) added. An entry for a key in an unpinnable class,
+// a malformed entry, or a value that is not in canonical form is an error, so
+// the server does not start with a pin it cannot honour safely.
+func (p CustomEnvPolicy) WithAllowedValues(spec string) (CustomEnvPolicy, error) {
+	pins, err := parseCustomEnvAllowedValues(spec)
+	if err != nil {
+		return CustomEnvPolicy{}, err
+	}
+	p.pinnedValues = pins
+	return p, nil
+}
+
+func parseCustomEnvAllowedValues(spec string) (map[string]map[string]struct{}, error) {
+	var pins map[string]map[string]struct{}
+	var errs []error
+	for _, raw := range strings.Split(spec, ";") {
+		entry := strings.TrimSpace(raw)
+		if entry == "" {
+			continue
+		}
+		key, values, ok := strings.Cut(entry, "=")
+		key = strings.TrimSpace(key)
+		if !ok || key == "" {
+			errs = append(errs, fmt.Errorf("%s entry %q is not KEY=VALUE|VALUE", CustomEnvAllowedValuesEnv, entry))
+			continue
+		}
+		if !customEnvNamePattern.MatchString(key) {
+			errs = append(errs, fmt.Errorf("%s key %q is not a valid environment variable name", CustomEnvAllowedValuesEnv, key))
+			continue
+		}
+		classes := customEnvFloorClasses(key)
+		refusedClass := ""
+		for _, class := range classes {
+			if _, hard := customEnvUnpinnableClasses[class]; hard {
+				refusedClass = class
+				break
+			}
+		}
+		if refusedClass != "" {
+			errs = append(errs, fmt.Errorf("%s key %q can never be allowed, whatever its value: %s (%s)", CustomEnvAllowedValuesEnv, key, customEnvClassReason[refusedClass], refusedClass))
+			continue
+		}
+		for _, value := range strings.Split(values, "|") {
+			if reason := nonCanonicalPinnedValue(value); reason != "" {
+				// The value is operator config, not a secret: name it so the
+				// operator can fix the entry.
+				errs = append(errs, fmt.Errorf("%s value %q for %s is refused: %s", CustomEnvAllowedValuesEnv, value, key, reason))
+				continue
+			}
+			if pins == nil {
+				pins = map[string]map[string]struct{}{}
+			}
+			if pins[key] == nil {
+				pins[key] = map[string]struct{}{}
+			}
+			pins[key][value] = struct{}{}
+		}
+	}
+	if len(errs) > 0 {
+		return nil, errors.Join(errs...)
+	}
+	return pins, nil
+}
+
+// nonCanonicalPinnedValue returns why value cannot be pinned, or "". Pinned
+// values match byte for byte, never after normalisation, so a listed value
+// must already be the one canonical spelling: an agent sending
+// "/a/b/", "/a/./b" or "/x/../a/b" for a pinned "/a/b" is refused, and the
+// list itself must not hold such a spelling.
+func nonCanonicalPinnedValue(value string) string {
+	switch {
+	case value == "":
+		return "it is empty"
+	case strings.TrimSpace(value) != value:
+		return "it has leading or trailing whitespace"
+	case strings.ContainsFunc(value, func(r rune) bool { return r < 0x20 || r == 0x7f }):
+		return "it contains a control character"
+	}
+	if strings.Contains(value, "/") {
+		if len(value) > 1 && strings.HasSuffix(value, "/") {
+			return "it ends with a slash"
+		}
+		if strings.Contains(value, "//") {
+			return "it contains an empty path segment"
+		}
+		for _, segment := range strings.Split(value, "/") {
+			if segment == "." || segment == ".." {
+				return "it contains a . or .. path segment"
+			}
+		}
+	}
+	return ""
+}
+
+// CustomEnvPolicyFromEnv reads CustomEnvAllowedKeysEnv and
+// CustomEnvAllowedValuesEnv from the process env.
 func CustomEnvPolicyFromEnv() (CustomEnvPolicy, error) {
-	return NewCustomEnvPolicy(os.Getenv(CustomEnvAllowedKeysEnv))
+	p, keysErr := NewCustomEnvPolicy(os.Getenv(CustomEnvAllowedKeysEnv))
+	pinned, valuesErr := p.WithAllowedValues(os.Getenv(CustomEnvAllowedValuesEnv))
+	if err := errors.Join(keysErr, valuesErr); err != nil {
+		return CustomEnvPolicy{}, err
+	}
+	return pinned, nil
 }
 
 // DenyAllCustomEnvPolicy refuses every key. The server falls back to it when
@@ -259,8 +407,37 @@ func (p CustomEnvPolicy) HasAllowList() bool {
 	return p.denyAll || p.allowExact != nil
 }
 
-// CheckKey returns nil when key may be stored and sent to a runtime, or a
-// *CustomEnvKeyError naming the class that refuses it.
+// PinnedKeys returns the keys that have value pins, sorted.
+func (p CustomEnvPolicy) PinnedKeys() []string {
+	keys := make([]string, 0, len(p.pinnedValues))
+	for key := range p.pinnedValues {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+// CheckEntry returns nil when key may be stored and sent to a runtime with
+// value, or a *CustomEnvKeyError naming the class that refuses it. A key with
+// value pins (CustomEnvAllowedValuesEnv) is accepted exactly when value is one
+// of its pinned values, whatever the floor or the allow-list say about the
+// key; with any other value it is refused. The error never holds the value.
+func (p CustomEnvPolicy) CheckEntry(key, value string) error {
+	if p.denyAll {
+		return p.CheckKey(key)
+	}
+	if allowed, pinned := p.pinnedValues[key]; pinned {
+		if _, ok := allowed[value]; ok {
+			return nil
+		}
+		return &CustomEnvKeyError{Key: key, Class: CustomEnvClassValueNotPinned}
+	}
+	return p.CheckKey(key)
+}
+
+// CheckKey returns nil when key may be stored and sent to a runtime whatever
+// its value, or a *CustomEnvKeyError naming the class that refuses it. It
+// ignores value pins; use CheckEntry when the value is known.
 func (p CustomEnvPolicy) CheckKey(key string) error {
 	if class := CustomEnvFloorClass(key); class != "" {
 		return &CustomEnvKeyError{Key: key, Class: class}
@@ -287,9 +464,9 @@ func (p CustomEnvPolicy) CheckKey(key string) error {
 // listing each refused key.
 func (p CustomEnvPolicy) Validate(env map[string]string) error {
 	var refused []*CustomEnvKeyError
-	for key := range env {
+	for key, value := range env {
 		var keyErr *CustomEnvKeyError
-		if errors.As(p.CheckKey(key), &keyErr) {
+		if errors.As(p.CheckEntry(key, value), &keyErr) {
 			refused = append(refused, keyErr)
 		}
 	}
@@ -309,7 +486,7 @@ func (p CustomEnvPolicy) Filter(env map[string]string) (map[string]string, []str
 	kept := make(map[string]string, len(env))
 	var dropped []string
 	for key, value := range env {
-		if p.CheckKey(key) != nil {
+		if p.CheckEntry(key, value) != nil {
 			dropped = append(dropped, key)
 			continue
 		}

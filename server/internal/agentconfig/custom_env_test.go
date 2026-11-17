@@ -228,3 +228,168 @@ func TestCustomEnvPolicy_Filter(t *testing.T) {
 		t.Fatal("Filter modified its input")
 	}
 }
+
+// pantheonClaudeAPIPins is the value Pantheon sets: its runtime routes Claude
+// API credit-lane agents by custom_env CLAUDE_CONFIG_DIR, one directory per
+// credits account (bin/multica-runtime-entrypoint.sh CLAUDE_API_DIRS).
+const pantheonClaudeAPIPins = "CLAUDE_CONFIG_DIR=/home/node/.claude-api|/home/node/.claude-api-2"
+
+func TestCustomEnvPolicy_PinnedValueAcceptedExactly(t *testing.T) {
+	p, err := CustomEnvPolicy{}.WithAllowedValues(pantheonClaudeAPIPins)
+	if err != nil {
+		t.Fatalf("WithAllowedValues: %v", err)
+	}
+	for _, value := range []string{"/home/node/.claude-api", "/home/node/.claude-api-2"} {
+		if err := p.CheckEntry("CLAUDE_CONFIG_DIR", value); err != nil {
+			t.Errorf("CheckEntry(CLAUDE_CONFIG_DIR, %q) = %v; want accepted", value, err)
+		}
+	}
+	if err := p.Validate(map[string]string{"CLAUDE_CONFIG_DIR": "/home/node/.claude-api-2", "SLACK_WEBHOOK_URL": "u"}); err != nil {
+		t.Fatalf("Validate = %v; want accepted", err)
+	}
+	kept, dropped := p.Filter(map[string]string{"CLAUDE_CONFIG_DIR": "/home/node/.claude-api"})
+	if len(dropped) != 0 || kept["CLAUDE_CONFIG_DIR"] != "/home/node/.claude-api" {
+		t.Fatalf("Filter kept=%v dropped=%v; want pinned value kept", kept, dropped)
+	}
+	if !reflect.DeepEqual(p.PinnedKeys(), []string{"CLAUDE_CONFIG_DIR"}) {
+		t.Fatalf("PinnedKeys = %v", p.PinnedKeys())
+	}
+	// A pin also admits the key under an allow-list that does not name it.
+	withList, err := NewCustomEnvPolicy("SLACK_WEBHOOK_URL")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if withList, err = withList.WithAllowedValues(pantheonClaudeAPIPins); err != nil {
+		t.Fatal(err)
+	}
+	if err := withList.CheckEntry("CLAUDE_CONFIG_DIR", "/home/node/.claude-api"); err != nil {
+		t.Fatalf("pinned key under an allow-list = %v; want accepted", err)
+	}
+}
+
+func TestCustomEnvPolicy_PinnedKeyOtherValuesRefused(t *testing.T) {
+	p, err := CustomEnvPolicy{}.WithAllowedValues(pantheonClaudeAPIPins)
+	if err != nil {
+		t.Fatalf("WithAllowedValues: %v", err)
+	}
+	for _, value := range []string{
+		"",
+		"/home/node/.claude",               // the OAuth lane
+		"/home/node/.claude-api/",          // trailing slash
+		"/home/node/.claude-api//",         // doubled slash
+		"/home/node//.claude-api",          // empty segment
+		"/home/node/./.claude-api",         // dot segment
+		"/home/node/x/../.claude-api",      // dot-dot back to the pin
+		"/home/node/.claude-api/../.codex", // dot-dot out of the pin
+		"/home/node/.claude-api-2/..",
+		"/home/node/.claude-api-3",
+		"/home/node/.claude-ap",                 // prefix of a pin
+		"/home/node/.claude-api-",               // prefix of a pin
+		"/home/node/.claude-api-22",             // pin as prefix
+		"/home/node/.claude-api/sub",            // pin as prefix
+		" /home/node/.claude-api",               // whitespace
+		"/home/node/.claude-api\n",              // control character
+		"/HOME/NODE/.CLAUDE-API",                // case
+		"~/.claude-api",                         // unexpanded home
+		"$HOME/.claude-api",                     // unexpanded variable
+		"/home/node/.claude-api|/tmp",           // separator smuggling
+		"/home/node/.claude-api\x00",            // NUL
+		"/proc/self/root/home/node/.claude-api", // symlink-style alias
+	} {
+		var keyErr *CustomEnvKeyError
+		if err := p.CheckEntry("CLAUDE_CONFIG_DIR", value); !errors.As(err, &keyErr) || keyErr.Class != CustomEnvClassValueNotPinned {
+			t.Errorf("CheckEntry(CLAUDE_CONFIG_DIR, %q) = %v; want value_not_pinned", value, err)
+		}
+	}
+	// The pin is for the exact key name: other spellings fall to the floor.
+	for _, key := range []string{"claude_config_dir", "Claude_Config_Dir", "CLAUDE_CONFIG_DIR_2"} {
+		if err := p.CheckEntry(key, "/home/node/.claude-api"); err == nil {
+			t.Errorf("CheckEntry(%q, pinned value) accepted; want floor refusal", key)
+		}
+	}
+	// The error names the key and class but never echoes the value.
+	err = p.Validate(map[string]string{"CLAUDE_CONFIG_DIR": "/attacker/dir"})
+	if err == nil || !strings.Contains(err.Error(), CustomEnvClassValueNotPinned) || strings.Contains(err.Error(), "/attacker/dir") {
+		t.Fatalf("Validate error = %v; want value_not_pinned without the value", err)
+	}
+	kept, dropped := p.Filter(map[string]string{"CLAUDE_CONFIG_DIR": "/home/node/.claude", "SLACK_WEBHOOK_URL": "u"})
+	if !reflect.DeepEqual(kept, map[string]string{"SLACK_WEBHOOK_URL": "u"}) || !reflect.DeepEqual(dropped, []string{"CLAUDE_CONFIG_DIR"}) {
+		t.Fatalf("Filter kept=%v dropped=%v; want unpinned value dropped", kept, dropped)
+	}
+}
+
+func TestCustomEnvPolicy_PinsDoNotOpenOtherDeniedKeys(t *testing.T) {
+	p, err := CustomEnvPolicy{}.WithAllowedValues(pantheonClaudeAPIPins)
+	if err != nil {
+		t.Fatalf("WithAllowedValues: %v", err)
+	}
+	for _, key := range []string{
+		"CODEX_CONFIG_DIR", "OPENCODE_CONFIG_DIR", "SOME_TOOL_CONFIG_DIR", "CLAUDE_CODE_SHELL_PREFIX",
+		"ANTHROPIC_BASE_URL", "NODE_OPTIONS", "LD_PRELOAD", "HTTPS_PROXY", "PATH", "BASH_ENV", "HOME",
+	} {
+		if err := p.CheckEntry(key, "/home/node/.claude-api"); err == nil {
+			t.Errorf("CheckEntry(%q, pinned value) accepted; want refusal", key)
+		}
+	}
+	if err := DenyAllCustomEnvPolicy().CheckEntry("CLAUDE_CONFIG_DIR", "/home/node/.claude-api"); err == nil {
+		t.Error("deny-all policy admitted a pinned value")
+	}
+}
+
+func TestCustomEnvPolicy_PinsRefuseHardClassesAndBadValues(t *testing.T) {
+	for _, spec := range []string{
+		// Keys whose class no pin can open.
+		"NODE_OPTIONS=--max-old-space-size=4096",
+		"LD_PRELOAD=/usr/lib/x.so", "LD_LIBRARY_PATH=/usr/lib",
+		"ANTHROPIC_BASE_URL=https://api.anthropic.com", "OPENAI_BASE_URL=https://api.openai.com",
+		"HTTPS_PROXY=http://proxy:3128", "http_proxy=http://proxy:3128", "NO_PROXY=localhost",
+		"PATH=/usr/bin", "BASH_ENV=/etc/profile", "HOME=/home/node", "MULTICA_TOKEN=x",
+		"SSL_CERT_FILE=/etc/ssl/cert.pem", "ANTHROPIC_API_KEY=sk", "GH_TOKEN=t",
+		// A config redirect that is also a network redirect.
+		"OTEL_CONFIG_DIR=/x",
+		// One bad entry spoils the whole setting.
+		pantheonClaudeAPIPins + ";NODE_OPTIONS=--inspect",
+		// Malformed entries.
+		"CLAUDE_CONFIG_DIR", "=/x", "BAD-NAME=/x", "CLAUDE_*=/x",
+		// Values that are not one canonical spelling.
+		"CLAUDE_CONFIG_DIR=", "CLAUDE_CONFIG_DIR=/a|", "CLAUDE_CONFIG_DIR=/home/node/.claude-api/",
+		"CLAUDE_CONFIG_DIR=/home/node/../node/.claude-api", "CLAUDE_CONFIG_DIR=/home/node/./.claude-api",
+		"CLAUDE_CONFIG_DIR=/home//node/.claude-api", "CLAUDE_CONFIG_DIR=/a/..",
+	} {
+		if _, err := (CustomEnvPolicy{}).WithAllowedValues(spec); err == nil {
+			t.Errorf("WithAllowedValues(%q) = nil error; want refusal", spec)
+		} else if !strings.Contains(err.Error(), CustomEnvAllowedValuesEnv) {
+			t.Errorf("WithAllowedValues(%q) error %q should name %s", spec, err, CustomEnvAllowedValuesEnv)
+		}
+	}
+	for _, spec := range []string{"", "  ", ";;", " " + pantheonClaudeAPIPins + " ; ", "CLAUDE_MODEL_LABEL=opus"} {
+		if _, err := (CustomEnvPolicy{}).WithAllowedValues(spec); err != nil {
+			t.Errorf("WithAllowedValues(%q) = %v; want accepted", spec, err)
+		}
+	}
+}
+
+func TestCustomEnvPolicyFromEnv_AllowedValues(t *testing.T) {
+	t.Setenv(CustomEnvAllowedKeysEnv, "")
+	t.Setenv(CustomEnvAllowedValuesEnv, pantheonClaudeAPIPins)
+	p, err := CustomEnvPolicyFromEnv()
+	if err != nil {
+		t.Fatalf("policy from env: %v", err)
+	}
+	if p.CheckEntry("CLAUDE_CONFIG_DIR", "/home/node/.claude-api-2") != nil || p.CheckEntry("CLAUDE_CONFIG_DIR", "/home/node/.claude") == nil {
+		t.Fatal("pins from env not applied")
+	}
+	// Each hard class named in the task stops the server from starting.
+	for _, spec := range []string{"NODE_OPTIONS=x", "LD_PRELOAD=/x", "ANTHROPIC_BASE_URL=https://x", "HTTPS_PROXY=http://x", "PATH=/usr/bin", "BASH_ENV=/x"} {
+		t.Setenv(CustomEnvAllowedValuesEnv, spec)
+		if _, err := CustomEnvPolicyFromEnv(); err == nil {
+			t.Errorf("%s=%q: expected a startup error", CustomEnvAllowedValuesEnv, spec)
+		}
+	}
+	// A bad allow-list still fails even with good pins.
+	t.Setenv(CustomEnvAllowedValuesEnv, pantheonClaudeAPIPins)
+	t.Setenv(CustomEnvAllowedKeysEnv, "LD_PRELOAD")
+	if _, err := CustomEnvPolicyFromEnv(); err == nil {
+		t.Fatal("expected an error for a floor-refused allow-list entry")
+	}
+}

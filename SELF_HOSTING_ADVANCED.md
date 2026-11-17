@@ -184,10 +184,27 @@ An agent's `custom_env` reaches the AI coding tool's process on whichever runtim
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `MULTICA_AGENT_ENV_ALLOWED_KEYS` | empty | Comma-separated exact key names and/or prefixes ending in `*` (e.g. `SLACK_WEBHOOK_URL,PROBE_*`). When set, every other key is refused. When empty, any key outside the fixed floor is accepted and the backend logs a warning at startup. |
+| `MULTICA_AGENT_ENV_ALLOWED_VALUES` | empty | Value pins: `;`-separated `KEY=VALUE\|VALUE` entries (e.g. `CLAUDE_CONFIG_DIR=/home/node/.claude-api\|/home/node/.claude-api-2`). A pinned key is accepted, on write and at claim, only when its value is byte-for-byte one of the listed values, even if the floor or the allow-list would refuse the key; any other value is refused with class `value_not_pinned`. |
 
 The fixed floor is refused whatever the allow-list says: daemon-owned names (`PATH`, `HOME`, `TMPDIR`, `MULTICA_*`, ...); keys that run code (`NODE_OPTIONS`, `LD_*`, `DYLD_*`, `PYTHON*`, `PERL5*`, `BASH_ENV`, `ENV`, `GIT_*`, `GOFLAGS`, editors, pagers, package-manager settings); config, home and data redirects (`*_HOME`, `*_CONFIG_DIR`, `XDG_*`, `KUBECONFIG`); network redirects (`*PROXY`, `*_BASE_URL`, `*_API_URL`, `*_ENDPOINT`, `*_HOST`, `OTEL_*`); TLS trust (`SSL_CERT_*`, `*_CA_BUNDLE`); credentials (`*_TOKEN`, `*_KEY`, `*_SECRET`, `*_PASSWORD`, `AWS_*`); and AI coding tool namespaces (`ANTHROPIC_*`, `CLAUDE_*`, `CODEX_*`, `OPENAI_*`, `GEMINI_*`, `HERMES_*`, `CURSOR_*`, `GH_*`, `GITHUB_*`, ...). Names must match `[A-Za-z_][A-Za-z0-9_]*`. The floor is a best effort over known classes; the allow-list is the control that does not depend on it being complete, so set it when agents on one runtime must not be able to influence another.
 
 A refused write returns `400` naming each key and its class. An allow-list entry the floor covers (`NODE_OPTIONS`, `GIT_*`, `*`) makes the backend refuse to start. Before you set or narrow the list, read each agent's keys (`multica agent env get <id>`, as a workspace owner/admin or the agent's owner) and include the ones still in use: keys outside the list are withheld from runs immediately (the backend logs `refused custom_env keys withheld from runtime` with the key names) and must be removed before that agent's env can be saved again.
+
+#### Value pins
+
+Some deployments route agents with a key the floor refuses. Pantheon's runtime, for example, sends an agent to a Claude API credits account instead of the runtime's OAuth login when the agent's `custom_env` sets `CLAUDE_CONFIG_DIR` to that account's directory. `MULTICA_AGENT_ENV_ALLOWED_VALUES` admits such a key for the exact values the operator lists and nothing else:
+
+```bash
+MULTICA_AGENT_ENV_ALLOWED_VALUES='CLAUDE_CONFIG_DIR=/home/node/.claude-api|/home/node/.claude-api-2'
+```
+
+- Values match byte for byte. The backend never normalises a path, so `/home/node/.claude-api/`, `/home/node/./.claude-api`, `/home/node/x/../.claude-api`, `/HOME/NODE/.claude-api`, `~/.claude-api` or a prefix of a listed value are all refused. The key name matches exactly too (`claude_config_dir` falls back to the floor).
+- A listed value must itself be the one canonical spelling: an empty value, surrounding whitespace, a control character, a trailing `/`, `//`, or a `.` or `..` path segment stops the backend from starting.
+- Only keys whose every floor class is a config/home/data redirect or an AI coding tool setting can be pinned. An entry for a key that runs code, redirects traffic, changes TLS trust, carries a credential, is daemon-owned or is not a valid name (`NODE_OPTIONS`, `LD_*`, `*_BASE_URL`, `*_PROXY`, `PATH`, `BASH_ENV`, `HOME`, `ANTHROPIC_API_KEY`, `OTEL_CONFIG_DIR`, ...) stops the backend from starting.
+- A pinned key does not need to be on `MULTICA_AGENT_ENV_ALLOWED_KEYS`; listing values for it is the allowance. Other keys are unaffected.
+- Pins are checked on `POST /api/agents`, on `PUT /api/agents/{id}/env` (against the merged map, so `****` keeps a stored value only if it is still pinned) and when a daemon claims a task. A stored value that is no longer pinned is withheld from the run, so remove a directory from the list only after no agent uses it.
+
+Set the pins before you deploy a backend with this rule if agents already use such a key: without them the key is refused on save and withheld at claim, and the agent runs on whatever the runtime's default is (for `CLAUDE_CONFIG_DIR`, the runtime's own login).
 
 This fork refuses `HERMES_HOME` and `CURSOR_MCP_AUTH_SOURCE` as config redirects, so the daemon's Hermes hint about setting `HERMES_HOME` in custom_env does not apply here; set it in the daemon's own environment instead.
 

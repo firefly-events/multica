@@ -154,6 +154,9 @@ services:
       # Allow-list of agent custom_env keys (names or PREFIX_*). Empty = only
       # the fixed deny floor applies. See SELF_HOSTING_ADVANCED.md.
       MULTICA_AGENT_ENV_ALLOWED_KEYS: ${MULTICA_AGENT_ENV_ALLOWED_KEYS:-}
+      # Exact values that open a refused key (KEY=VALUE|VALUE;...). Empty =
+      # no pins. See SELF_HOSTING_ADVANCED.md.
+      MULTICA_AGENT_ENV_ALLOWED_VALUES: ${MULTICA_AGENT_ENV_ALLOWED_VALUES:-}
       # Server-side LLM layer, backing internal helpers such as chat title
       # generation. Both the API key and the base URL empty = layer disabled,
       # and callers fall back silently rather than failing. MULTICA_LLM_MAX_RETRIES

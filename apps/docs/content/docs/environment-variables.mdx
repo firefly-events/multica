@@ -178,8 +178,9 @@ The server checks every key of an agent's custom environment variables when they
 | Variable | Default | Description |
 |---|---|---|
 | `MULTICA_AGENT_ENV_ALLOWED_KEYS` | empty | Comma-separated key names, or prefixes ending in `*`, that agents may set, such as `SLACK_WEBHOOK_URL,PROBE_*`. Empty accepts any key outside the refused classes. |
+| `MULTICA_AGENT_ENV_ALLOWED_VALUES` | empty | Exact values that open a refused key, as `KEY=VALUE\|VALUE` entries separated by `;`, such as `CLAUDE_CONFIG_DIR=/home/node/.claude-api\|/home/node/.claude-api-2`. The key is then accepted only when its value matches one listed value byte for byte; any other value is still refused. Only config, home and data redirects and AI coding tool settings can be pinned. |
 
-An entry the refused classes cover, such as `NODE_OPTIONS` or `GIT_*`, stops the server from starting. Narrowing the list also withholds the dropped keys from runs at once.
+An entry the refused classes cover, such as `NODE_OPTIONS` or `GIT_*`, stops the server from starting. So does a value pin for a key that runs code, redirects traffic, changes TLS trust, carries a credential or is daemon-owned (`NODE_OPTIONS`, `LD_*`, `*_BASE_URL`, `*_PROXY`, `PATH`, `BASH_ENV`, ...), or a pinned value that is empty, ends in `/`, or holds a `.`, `..` or empty path segment. Narrowing the list also withholds the dropped keys from runs at once.
 
 ## External integrations
 
