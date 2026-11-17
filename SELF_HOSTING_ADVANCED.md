@@ -177,6 +177,42 @@ rewrite configuration. Its backend fallback therefore accepts
 `BACKEND_PORT` → `API_PORT` → `SERVER_PORT` → `8080`, while an explicit
 `REMOTE_API_URL` or `NEXT_PUBLIC_API_URL` still takes priority.
 
+### Agent custom environment variables
+
+An agent's `custom_env` reaches the AI coding tool's process on whichever runtime serves the agent. The backend checks every key on `POST /api/agents` and `PUT /api/agents/{id}/env`, and again when a daemon claims a task, so a row written straight to the database is filtered before a runtime sees it. The rule lives in `server/internal/agentconfig/custom_env.go`.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `MULTICA_AGENT_ENV_ALLOWED_KEYS` | empty | Comma-separated exact key names and/or prefixes ending in `*` (e.g. `SLACK_WEBHOOK_URL,PROBE_*`). When set, every other key is refused. When empty, any key outside the fixed floor is accepted and the backend logs a warning at startup. |
+
+The fixed floor is refused whatever the allow-list says: daemon-owned names (`PATH`, `HOME`, `TMPDIR`, `MULTICA_*`, ...); keys that run code (`NODE_OPTIONS`, `LD_*`, `DYLD_*`, `PYTHON*`, `PERL5*`, `BASH_ENV`, `ENV`, `GIT_*`, `GOFLAGS`, editors, pagers, package-manager settings); config, home and data redirects (`*_HOME`, `*_CONFIG_DIR`, `XDG_*`, `KUBECONFIG`); network redirects (`*PROXY`, `*_BASE_URL`, `*_API_URL`, `*_ENDPOINT`, `*_HOST`, `OTEL_*`); TLS trust (`SSL_CERT_*`, `*_CA_BUNDLE`); credentials (`*_TOKEN`, `*_KEY`, `*_SECRET`, `*_PASSWORD`, `AWS_*`); and AI coding tool namespaces (`ANTHROPIC_*`, `CLAUDE_*`, `CODEX_*`, `OPENAI_*`, `GEMINI_*`, `HERMES_*`, `CURSOR_*`, `GH_*`, `GITHUB_*`, ...). Names must match `[A-Za-z_][A-Za-z0-9_]*`. The floor is a best effort over known classes; the allow-list is the control that does not depend on it being complete, so set it when agents on one runtime must not be able to influence another.
+
+A refused write returns `400` naming each key and its class. An allow-list entry the floor covers (`NODE_OPTIONS`, `GIT_*`, `*`) makes the backend refuse to start. Before you set or narrow the list, read each agent's keys (`multica agent env get <id>`, as a workspace owner/admin or the agent's owner) and include the ones still in use: keys outside the list are withheld from runs immediately (the backend logs `refused custom_env keys withheld from runtime` with the key names) and must be removed before that agent's env can be saved again.
+
+This fork refuses `HERMES_HOME` and `CURSOR_MCP_AUTH_SOURCE` as config redirects, so the daemon's Hermes hint about setting `HERMES_HOME` in custom_env does not apply here; set it in the daemon's own environment instead.
+
+### Isolating runtimes from each other
+
+The custom_env rule limits what one key can do. Who may write the keys is decided by the credential each runtime holds. When two runtimes serve different trust zones (for example, different people's AI coding tool logins), make sure neither can write the other's agents:
+
+1. **One Multica user per runtime, with the `member` role.** Invite a dedicated user for each runtime and give it `member`, not `owner` or `admin`. `PUT /api/agents/{id}/env` admits only a workspace owner/admin or the agent's own owner, so a member PAT cannot touch agents it does not own.
+2. **One PAT per runtime, minted as that user.** Each daemon authenticates with its own user's PAT (never an owner's). Agents a runtime serves should be owned by that runtime's user: a private runtime only runs agents its owner owns, and an agent's owner can rewrite its env.
+3. **A real PostgreSQL password.** `POSTGRES_PASSWORD` defaults to `multica`. Anyone who reaches port 5432 with it can edit `agent.custom_env`, mint a PAT row for any user, or read webhook secrets directly. Generate one (`openssl rand -hex 24`), set it in `.env`, and change it in the running database with `ALTER USER multica PASSWORD '...'` before restarting the backend with the new `DATABASE_URL`.
+4. **PostgreSQL on a backend-only network.** In `docker-compose.selfhost.yml` the database shares the default compose network (`<project>_default`) with the backend. If runtimes or other untrusted containers join that network to reach the backend, give PostgreSQL its own `internal: true` network that only the backend joins, for example with a `docker-compose.override.yml`:
+
+   ```yaml
+   networks:
+     db:
+       internal: true
+   services:
+     postgres:
+       networks: [db]
+     backend:
+       networks: [default, db]
+   ```
+
+   Then confirm from a runtime container that `postgres:5432` no longer resolves or connects.
+
 ### WeCom frame tracing
 
 | Variable | Default | Description |

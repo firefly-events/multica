@@ -2531,6 +2531,7 @@ func (h *Handler) buildClaimedTaskResponse(r *http.Request, task *db.AgentTaskQu
 		if err := json.Unmarshal(agent.CustomEnv, &customEnv); err != nil {
 			slog.Warn("failed to unmarshal agent custom_env", "agent_id", uuidToString(agent.ID), "error", err)
 		}
+		customEnv = h.filterCustomEnvForDaemon(uuidToString(agent.ID), customEnv)
 	}
 	var customArgs []string
 	if agent.CustomArgs != nil {

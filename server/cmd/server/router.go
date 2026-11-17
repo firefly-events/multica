@@ -18,6 +18,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
 
+	"github.com/multica-ai/multica/server/internal/agentconfig"
 	"github.com/multica-ai/multica/server/internal/analytics"
 	"github.com/multica-ai/multica/server/internal/auth"
 	"github.com/multica-ai/multica/server/internal/cloudruntime"
@@ -194,6 +195,18 @@ func parseTrustedProxies(raw string) []netip.Prefix {
 // string hides the Help popover's version row instead of rendering
 // "Server version dev" for a local `go build`/`go run` or a self-hosted
 // `docker build` without --build-arg VERSION.
+// customEnvPolicyFromEnv reads MULTICA_AGENT_ENV_ALLOWED_KEYS. main refuses
+// to start on a bad value; a router built some other way (tests, tools) falls
+// back to refusing every key rather than to the floor alone.
+func customEnvPolicyFromEnv() agentconfig.CustomEnvPolicy {
+	policy, err := agentconfig.CustomEnvPolicyFromEnv()
+	if err != nil {
+		slog.Error("invalid "+agentconfig.CustomEnvAllowedKeysEnv+"; refusing every agent custom_env key", "error", err)
+		return agentconfig.DenyAllCustomEnvPolicy()
+	}
+	return policy
+}
+
 func normalizeServerVersion(v string) string {
 	if v == "dev" {
 		return ""
@@ -426,6 +439,7 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 		PublicURL:                strings.TrimRight(strings.TrimSpace(os.Getenv("MULTICA_PUBLIC_URL")), "/"),
 		AppURL:                   appURLFromEnv(),
 		TrustedProxies:           parseTrustedProxies(os.Getenv("MULTICA_TRUSTED_PROXIES")),
+		CustomEnvPolicy:          customEnvPolicyFromEnv(),
 		CloudURL:                 strings.TrimSpace(os.Getenv("MULTICA_CLOUD_URL")),
 		CloudTimeout:             35 * time.Second,
 		AttachmentDownloadMode:   os.Getenv("ATTACHMENT_DOWNLOAD_MODE"),

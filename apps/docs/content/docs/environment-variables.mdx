@@ -171,6 +171,16 @@ Deployments behind a reverse proxy must list their real proxy ranges. Do not bla
 
 The auth rate limits require `REDIS_URL`; without it, the startup log notes that auth rate limiting is disabled. Invitation limits still run in process-local memory without Redis and become shared across replicas when Redis is configured. If configured Redis becomes temporarily unavailable, auth rate limiting fails open, while invitation creation returns a retryable `503` instead of sending email without protection.
 
+## Agent environment variables
+
+The server checks every key of an agent's custom environment variables when they are saved and again before a run receives them. A fixed set of key classes is always refused; see [Create an agent](/agents-create#environment-variables-and-credentials).
+
+| Variable | Default | Description |
+|---|---|---|
+| `MULTICA_AGENT_ENV_ALLOWED_KEYS` | empty | Comma-separated key names, or prefixes ending in `*`, that agents may set, such as `SLACK_WEBHOOK_URL,PROBE_*`. Empty accepts any key outside the refused classes. |
+
+An entry the refused classes cover, such as `NODE_OPTIONS` or `GIT_*`, stops the server from starting. Narrowing the list also withholds the dropped keys from runs at once.
+
 ## External integrations
 
 | Integration | Variable | Description |

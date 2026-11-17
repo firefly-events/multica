@@ -1517,6 +1517,9 @@ func (h *Handler) CreateAgent(w http.ResponseWriter, r *http.Request) {
 		rc = []byte("{}")
 	}
 
+	if !h.requireAllowedCustomEnv(w, req.CustomEnv) {
+		return
+	}
 	ce, _ := json.Marshal(req.CustomEnv)
 	if req.CustomEnv == nil {
 		ce = []byte("{}")
