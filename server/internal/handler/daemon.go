@@ -107,6 +107,10 @@ func (h *Handler) requireDaemonRuntimeAccess(w http.ResponseWriter, r *http.Requ
 	if !h.requireDaemonWorkspaceAccess(w, r, uuidToString(rt.WorkspaceID)) {
 		return db.AgentRuntime{}, false
 	}
+	if !h.daemonCallerMayActForRuntime(r, uuidToString(rt.WorkspaceID), rt.OwnerID) {
+		writeError(w, http.StatusNotFound, "runtime not found")
+		return db.AgentRuntime{}, false
+	}
 	return rt, true
 }
 
@@ -162,7 +166,69 @@ func (h *Handler) requireDaemonTaskAccessWithWorkspace(w http.ResponseWriter, r 
 	if !h.requireDaemonWorkspaceAccess(w, r, wsID) {
 		return db.AgentTaskQueue{}, "", false
 	}
+	if !h.requireDaemonTaskRuntimeOwner(w, r, wsID, task.RuntimeID) {
+		return db.AgentTaskQueue{}, "", false
+	}
 	return task, wsID, true
+}
+
+// requireDaemonTaskRuntimeOwner applies daemonCallerMayActForRuntime to the
+// runtime that holds a task. A user credential reports on, completes or reads
+// a task only when it owns the runtime the task was claimed on. 404 like a
+// missing task, so the route does not confirm another runtime's task ids.
+func (h *Handler) requireDaemonTaskRuntimeOwner(w http.ResponseWriter, r *http.Request, workspaceID string, runtimeID pgtype.UUID) bool {
+	if middleware.DaemonWorkspaceIDFromContext(r.Context()) != "" {
+		return true
+	}
+	var ownerID pgtype.UUID
+	if runtimeID.Valid {
+		rt, err := h.getAgentRuntime(r.Context(), obsmetrics.RuntimeLookupSourceDaemonAPI, runtimeID)
+		if err != nil && !isNotFound(err) {
+			slog.Warn("get task runtime failed", "runtime_id", uuidToString(runtimeID), "error", err)
+			writeError(w, http.StatusInternalServerError, "failed to load task")
+			return false
+		}
+		if err == nil {
+			ownerID = rt.OwnerID
+		}
+	}
+	if !h.daemonCallerMayActForRuntime(r, workspaceID, ownerID) {
+		writeError(w, http.StatusNotFound, "task not found")
+		return false
+	}
+	return true
+}
+
+// daemonCallerMayActForRuntime is the per-runtime half of daemon
+// authorization. Workspace membership alone used to let any member's user
+// credential act for every runtime in the workspace: claim another member's
+// queued tasks (and receive a task token bound to that runtime's owner),
+// heartbeat or deregister it, and report on its tasks.
+//
+// A user credential (PAT, JWT, cloud PAT) now acts only for runtimes that same
+// user owns. A runtime with no owner (registered with a daemon token) is open
+// to a workspace owner or admin only. Daemon tokens (mdt_) are bound to one
+// workspace and one daemon id and keep their own checks.
+//
+// The rule separates runtimes only when each runtime registers as its own
+// user. Runtimes that share one user's PAT all have that user as owner, so the
+// check passes for every one of them (see SELF_HOSTING_ADVANCED.md).
+func (h *Handler) daemonCallerMayActForRuntime(r *http.Request, workspaceID string, ownerID pgtype.UUID) bool {
+	if middleware.DaemonWorkspaceIDFromContext(r.Context()) != "" {
+		return true
+	}
+	userID := requestUserID(r)
+	if userID == "" {
+		return false
+	}
+	if ownerID.Valid {
+		return uuidToString(ownerID) == userID
+	}
+	member, err := h.getWorkspaceMember(r.Context(), userID, workspaceID)
+	if err != nil {
+		return false
+	}
+	return roleAllowed(member.Role, "owner", "admin")
 }
 
 // verifyDaemonWorkspaceAccess checks workspace access without writing an HTTP error.
@@ -339,6 +405,10 @@ var errRuntimeProfileDisabled = errors.New("runtime profile is disabled")
 // commits; DeleteRuntimeProfile takes a conflicting UPDATE lock before it
 // enumerates runtime rows. This closes the stale-read window where deletion
 // could miss an instance inserted by a concurrently registering daemon.
+// errRuntimeOwnedByAnotherUser refuses a registration whose daemon_id already
+// holds runtimes another user owns.
+var errRuntimeOwnedByAnotherUser = errors.New("daemon_id is registered to another user")
+
 func (h *Handler) upsertRuntimeWithProfile(
 	ctx context.Context,
 	workspaceID, profileID pgtype.UUID,
@@ -366,6 +436,11 @@ func (h *Handler) upsertRuntimeWithProfile(
 	}
 
 	row, err = qtx.UpsertAgentRuntimeWithProfile(ctx, build(profile))
+	if errors.Is(err, pgx.ErrNoRows) {
+		// The upsert's owner predicate skipped the update: the row exists
+		// and another user owns it.
+		return row, profile, errRuntimeOwnedByAnotherUser
+	}
 	if err != nil {
 		return row, profile, fmt.Errorf("upsert profile runtime: %w", err)
 	}
@@ -448,6 +523,31 @@ func (h *Handler) DaemonRegister(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		ownerID = member.UserID
+		// A daemon_id is broadcast to every workspace socket, so knowing one
+		// proves nothing. Re-registering a daemon_id whose runtimes another
+		// user owns would move owner_id to the caller (and with it the
+		// runtime's tasks, task tokens and private-runtime agents). Refuse
+		// before any row is written; the upsert's WHERE closes the race.
+		existing, err := h.Queries.ListAgentRuntimeOwnersByDaemonID(r.Context(), db.ListAgentRuntimeOwnersByDaemonIDParams{
+			WorkspaceID: wsUUID,
+			DaemonID:    strToText(req.DaemonID),
+		})
+		if err != nil {
+			slog.Warn("daemon register: owner lookup failed", "workspace_id", req.WorkspaceID, "error", err)
+			writeError(w, http.StatusInternalServerError, "failed to register runtime")
+			return
+		}
+		isAdmin := roleAllowed(member.Role, "owner", "admin")
+		for _, row := range existing {
+			if row.OwnerID.Valid && row.OwnerID != member.UserID {
+				writeError(w, http.StatusForbidden, errRuntimeOwnedByAnotherUser.Error())
+				return
+			}
+			if !row.OwnerID.Valid && !isAdmin {
+				writeError(w, http.StatusForbidden, errRuntimeOwnedByAnotherUser.Error())
+				return
+			}
+		}
 	}
 
 	ws, err := h.Queries.GetWorkspace(r.Context(), wsUUID)
@@ -532,6 +632,10 @@ func (h *Handler) DaemonRegister(w http.ResponseWriter, r *http.Request) {
 					}
 				},
 			)
+			if errors.Is(err, errRuntimeOwnedByAnotherUser) {
+				writeError(w, http.StatusForbidden, err.Error())
+				return
+			}
 			if errors.Is(err, pgx.ErrNoRows) {
 				writeError(w, http.StatusBadRequest, "unknown runtime profile: "+runtime.ProfileID)
 				return
@@ -586,6 +690,10 @@ func (h *Handler) DaemonRegister(w http.ResponseWriter, r *http.Request) {
 				Metadata:    metadata,
 				OwnerID:     ownerID,
 			})
+			if errors.Is(err, pgx.ErrNoRows) {
+				writeError(w, http.StatusForbidden, errRuntimeOwnedByAnotherUser.Error())
+				return
+			}
 			if err != nil {
 				obsmetrics.RecordEvent(h.Analytics, h.Metrics, analytics.RuntimeFailed(
 					uuidToString(ownerID),
@@ -791,6 +899,15 @@ func (h *Handler) mergeLegacyRuntimes(r *http.Request, registered db.AgentRuntim
 		for _, old := range matches {
 			oldID := uuidToString(old.ID)
 			if oldID == newID {
+				continue
+			}
+			// A user credential folds only runtimes that same user owns. Legacy
+			// ids come from the request body, so without this a member could
+			// name another member's daemon_id and take its agents and tasks.
+			if middleware.DaemonWorkspaceIDFromContext(r.Context()) == "" &&
+				(!old.OwnerID.Valid || old.OwnerID != registered.OwnerID) {
+				slog.Warn("legacy runtime merge: skipped a runtime another user owns",
+					"legacy_daemon_id", legacyID, "old_runtime_id", oldID, "new_runtime_id", newID)
 				continue
 			}
 			if _, seen := merged[oldID]; seen {
@@ -1004,6 +1121,10 @@ func (h *Handler) DaemonDeregister(w http.ResponseWriter, r *http.Request) {
 			slog.Warn("deregister: workspace mismatch", "runtime_id", rid)
 			continue
 		}
+		if !h.daemonCallerMayActForRuntime(r, wsID, rt.OwnerID) {
+			slog.Warn("deregister: runtime owned by another user", "runtime_id", rid)
+			continue
+		}
 
 		if err := h.setRuntimeOffline(r.Context(), rt.ID, req.OfflineReasons[rid]); err != nil {
 			slog.Warn("deregister: failed to set offline", "runtime_id", rid, "error", err)
@@ -1199,6 +1320,11 @@ func (h *Handler) DaemonHeartbeat(w http.ResponseWriter, r *http.Request) {
 	workspaceCheckMs = time.Since(wsCheckStart).Milliseconds()
 	if !wsOK {
 		outcome = "workspace_denied"
+		return
+	}
+	if !h.daemonCallerMayActForRuntime(r, uuidToString(rt.WorkspaceID), rt.OwnerID) {
+		outcome = "owner_denied"
+		writeError(w, http.StatusNotFound, "runtime not found")
 		return
 	}
 	authMs = time.Since(start).Milliseconds()
@@ -1874,6 +2000,12 @@ func (h *Handler) ClaimTasksByRuntime(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		if !h.verifyDaemonWorkspaceAccess(r, uuidToString(rt.WorkspaceID)) {
+			continue
+		}
+		// The daemon_id below is broadcast to workspace sockets, so it does
+		// not prove the caller runs this machine. A user credential claims
+		// only for runtimes that user owns.
+		if !h.daemonCallerMayActForRuntime(r, uuidToString(rt.WorkspaceID), rt.OwnerID) {
 			continue
 		}
 		// Group-ownership check (mirrors the WS path, daemon_ws.go): a runtime
@@ -4983,6 +5115,10 @@ func (h *Handler) GetTaskStatus(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if !h.requireDaemonWorkspaceAccess(w, r, uuidToString(task.WorkspaceID)) {
+		return
+	}
+	if !h.daemonCallerMayActForRuntime(r, uuidToString(task.WorkspaceID), task.RuntimeOwnerID) {
+		writeError(w, http.StatusNotFound, "task not found")
 		return
 	}
 

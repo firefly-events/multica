@@ -230,6 +230,17 @@ The custom_env rule limits what one key can do. Who may write the keys is decide
 
    Then confirm from a runtime container that `postgres:5432` no longer resolves or connects.
 
+#### What the server enforces per runtime
+
+With one user per runtime, the server keeps each runtime's user to its own runtimes and agents:
+
+- **Daemon routes act only for the caller's own runtimes.** A user credential (PAT or session JWT) on `/api/daemon/*` acts only for runtimes that same user owns: claim (`/runtimes/{id}/tasks/claim`, the batch `/tasks/claim` and the WebSocket claim), heartbeat, deregister, the WebSocket runtime set, the runtime result routes (models, local skills, update, recover-orphans) and every task route (status, start, progress, messages, usage, complete, fail, session, plugin hooks). Any other runtime or its tasks answer `404`. A runtime with no owner (registered with a daemon token) is open only to a workspace owner or admin. Without this, member A's PAT could claim member B's queued tasks: the claim hands over B's prompt and allow-listed `custom_env`, and mints a task token bound to B.
+- **A daemon_id cannot be taken over.** Registering with a `daemon_id` whose runtimes another user owns returns `403 daemon_id is registered to another user`, and the owner stays the same. A `daemon_id` is broadcast to workspace sockets, so knowing one proves nothing. `legacy_daemon_ids` fold in only runtimes the caller already owns. The owner of a runtime re-registering its own `daemon_id` (a reconnect) works as before.
+- **A task token never manages an agent.** A request made with an agent's `mat_` task token can't update (`custom_args`, `mcp_config`, `instructions`, `runtime_id`, model, ...), archive, restore, relabel or reassign skills on any agent, its own included. It gets `403`. `custom_env` and MCP library assignments already refused agents. People keep their powers: in the UI or CLI, an agent's owner can still edit it, and a workspace owner or admin can still edit any agent.
+- Daemon tokens (`mdt_`) are unchanged: they are bound to one workspace and one daemon id.
+
+**Until each runtime has its own user, this separates nothing.** If two runtimes register with the same PAT, both are owned by that one user. Every owner check then passes for both runtimes, and a task token from either can still be used on the other's agents through the same user. The protection takes effect only after the split in steps 1 and 2: give each runtime its own member user and PAT, move each runtime's agents to its user, and re-register each daemon with its own PAT. Do this in one drained window, because a private runtime runs only agents its owner owns. Re-registering a `daemon_id` under a different user is now refused. So when you split a runtime that was registered by the shared user, give it a new `daemon_id` (delete `~/.multica/daemon.id` in that runtime before it starts with the new PAT), or have a workspace owner or admin delete the old runtime row first, and then move its agents to the new runtime.
+
 ### WeCom frame tracing
 
 | Variable | Default | Description |

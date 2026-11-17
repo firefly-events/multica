@@ -707,9 +707,12 @@ WHERE id = $1;
 -- Hot-path status polling needs only the task status and the owning agent's
 -- workspace for authorization. Keep this independent of optional source links
 -- (issue, chat session, autopilot run) so it needs no source-entity lookup.
-SELECT atq.status, a.workspace_id
+-- runtime_owner_id lets a user-credential caller be checked against the
+-- runtime that holds the task in the same round trip.
+SELECT atq.status, a.workspace_id, rt.owner_id AS runtime_owner_id
 FROM agent_task_queue atq
 JOIN agent a ON a.id = atq.agent_id
+LEFT JOIN agent_runtime rt ON rt.id = atq.runtime_id
 WHERE atq.id = $1;
 
 -- name: TouchAgentTaskHeartbeat :exec

@@ -1374,14 +1374,24 @@ func TestUpdateAgent_RedactsMcpConfigForAgentActor(t *testing.T) {
 		"description": desc,
 	})
 	req = withURLParam(req, "id", target)
-	// Simulate a task-token-authenticated agent request. The auth
-	// middleware would normally set these; we mimic both the modern
-	// path (X-Actor-Source) and the legacy header pair so the test is
-	// resilient to either resolveActor branch.
-	req.Header.Set("X-Actor-Source", "task_token")
+	// A task-token request (X-Actor-Source=task_token, which the auth
+	// middleware sets for mat_) can no longer mutate any agent at all:
+	// canManageAgent refuses it before the response is built.
+	ttReq := req.Clone(req.Context())
+	ttReq.Header.Set("X-Actor-Source", "task_token")
+	ttReq.Header.Set("X-Agent-ID", caller)
+	ttReq.Header.Set("X-Task-ID", taskID)
+	w := httptest.NewRecorder()
+	testHandler.UpdateAgent(w, ttReq)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("UpdateAgent with task token: expected 403, got %d: %s", w.Code, w.Body.String())
+	}
+
+	// The redaction still guards the in-process path that resolves the actor
+	// from the legacy header pair (an agent acting with its owner's PAT).
 	req.Header.Set("X-Agent-ID", caller)
 	req.Header.Set("X-Task-ID", taskID)
-	w := httptest.NewRecorder()
+	w = httptest.NewRecorder()
 	testHandler.UpdateAgent(w, req)
 	if w.Code != http.StatusOK {
 		t.Fatalf("UpdateAgent: expected 200, got %d: %s", w.Code, w.Body.String())

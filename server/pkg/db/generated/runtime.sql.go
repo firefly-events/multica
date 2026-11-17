@@ -495,7 +495,7 @@ func (q *Queries) GetAgentRuntimeForWorkspace(ctx context.Context, arg GetAgentR
 }
 
 const getAgentRuntimeHeartbeatLeases = `-- name: GetAgentRuntimeHeartbeatLeases :many
-SELECT id, workspace_id, daemon_id, status, last_seen_at
+SELECT id, workspace_id, daemon_id, owner_id, status, last_seen_at
 FROM agent_runtime
 WHERE id = ANY($1::uuid[])
 `
@@ -504,6 +504,7 @@ type GetAgentRuntimeHeartbeatLeasesRow struct {
 	ID          pgtype.UUID        `json:"id"`
 	WorkspaceID pgtype.UUID        `json:"workspace_id"`
 	DaemonID    pgtype.Text        `json:"daemon_id"`
+	OwnerID     pgtype.UUID        `json:"owner_id"`
 	Status      string             `json:"status"`
 	LastSeenAt  pgtype.Timestamptz `json:"last_seen_at"`
 }
@@ -525,6 +526,7 @@ func (q *Queries) GetAgentRuntimeHeartbeatLeases(ctx context.Context, ids []pgty
 			&i.ID,
 			&i.WorkspaceID,
 			&i.DaemonID,
+			&i.OwnerID,
 			&i.Status,
 			&i.LastSeenAt,
 		); err != nil {
@@ -637,6 +639,45 @@ func (q *Queries) ListAgentRuntimeIDsByWorkspace(ctx context.Context, workspaceI
 			return nil, err
 		}
 		items = append(items, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listAgentRuntimeOwnersByDaemonID = `-- name: ListAgentRuntimeOwnersByDaemonID :many
+SELECT id, owner_id FROM agent_runtime
+WHERE workspace_id = $1
+  AND daemon_id = $2
+`
+
+type ListAgentRuntimeOwnersByDaemonIDParams struct {
+	WorkspaceID pgtype.UUID `json:"workspace_id"`
+	DaemonID    pgtype.Text `json:"daemon_id"`
+}
+
+type ListAgentRuntimeOwnersByDaemonIDRow struct {
+	ID      pgtype.UUID `json:"id"`
+	OwnerID pgtype.UUID `json:"owner_id"`
+}
+
+// Every runtime row a daemon_id already holds in a workspace, with its owner.
+// Registration reads it before the upsert so a user credential cannot claim a
+// daemon_id (and with it the runtime rows) that another user registered.
+func (q *Queries) ListAgentRuntimeOwnersByDaemonID(ctx context.Context, arg ListAgentRuntimeOwnersByDaemonIDParams) ([]ListAgentRuntimeOwnersByDaemonIDRow, error) {
+	rows, err := q.db.Query(ctx, listAgentRuntimeOwnersByDaemonID, arg.WorkspaceID, arg.DaemonID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListAgentRuntimeOwnersByDaemonIDRow{}
+	for rows.Next() {
+		var i ListAgentRuntimeOwnersByDaemonIDRow
+		if err := rows.Scan(&i.ID, &i.OwnerID); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
@@ -1592,6 +1633,9 @@ DO UPDATE SET
     owner_id = COALESCE(EXCLUDED.owner_id, agent_runtime.owner_id),
     last_seen_at = now(),
     updated_at = now()
+WHERE agent_runtime.owner_id IS NULL
+   OR EXCLUDED.owner_id IS NULL
+   OR agent_runtime.owner_id = EXCLUDED.owner_id
 RETURNING id, workspace_id, daemon_id, name, runtime_mode, provider, status, device_info, metadata, last_seen_at, created_at, updated_at, owner_id, legacy_daemon_id, visibility, profile_id, custom_name, (xmax = 0) AS inserted
 `
 
@@ -1635,6 +1679,10 @@ type UpsertAgentRuntimeRow struct {
 // index from migration 121 (WHERE profile_id IS NULL); the predicate must be
 // spelled out so Postgres selects that partial index, not the custom-runtime
 // one on (workspace_id, daemon_id, profile_id).
+// A user credential never takes over a runtime another user owns: re-sending
+// that runtime's daemon_id must not move owner_id. The handler refuses first
+// (ListAgentRuntimeOwnersByDaemonID); this predicate closes the race between
+// that read and the write. A skipped update returns no row (pgx.ErrNoRows).
 func (q *Queries) UpsertAgentRuntime(ctx context.Context, arg UpsertAgentRuntimeParams) (UpsertAgentRuntimeRow, error) {
 	row := q.db.QueryRow(ctx, upsertAgentRuntime,
 		arg.WorkspaceID,
@@ -1696,6 +1744,9 @@ DO UPDATE SET
     owner_id = COALESCE(EXCLUDED.owner_id, agent_runtime.owner_id),
     last_seen_at = now(),
     updated_at = now()
+WHERE agent_runtime.owner_id IS NULL
+   OR EXCLUDED.owner_id IS NULL
+   OR agent_runtime.owner_id = EXCLUDED.owner_id
 RETURNING id, workspace_id, daemon_id, name, runtime_mode, provider, status, device_info, metadata, last_seen_at, created_at, updated_at, owner_id, legacy_daemon_id, visibility, profile_id, custom_name, (xmax = 0) AS inserted
 `
 
@@ -1740,6 +1791,10 @@ type UpsertAgentRuntimeWithProfileRow struct {
 // profiles of the same protocol family. provider carries the base runtime
 // identity so ResolveBackend applies its descriptor; profile_id preserves
 // custom-profile provenance. (xmax = 0) AS inserted mirrors UpsertAgentRuntime.
+// A user credential never takes over a runtime another user owns: re-sending
+// that runtime's daemon_id must not move owner_id. The handler refuses first
+// (ListAgentRuntimeOwnersByDaemonID); this predicate closes the race between
+// that read and the write. A skipped update returns no row (pgx.ErrNoRows).
 func (q *Queries) UpsertAgentRuntimeWithProfile(ctx context.Context, arg UpsertAgentRuntimeWithProfileParams) (UpsertAgentRuntimeWithProfileRow, error) {
 	row := q.db.QueryRow(ctx, upsertAgentRuntimeWithProfile,
 		arg.WorkspaceID,
