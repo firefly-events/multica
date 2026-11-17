@@ -177,6 +177,70 @@ rewrite configuration. Its backend fallback therefore accepts
 `BACKEND_PORT` → `API_PORT` → `SERVER_PORT` → `8080`, while an explicit
 `REMOTE_API_URL` or `NEXT_PUBLIC_API_URL` still takes priority.
 
+### Agent custom environment variables
+
+An agent's `custom_env` reaches the AI coding tool's process on whichever runtime serves the agent. The backend checks every key on `POST /api/agents` and `PUT /api/agents/{id}/env`, and again when a daemon claims a task, so a row written straight to the database is filtered before a runtime sees it. The rule lives in `server/internal/agentconfig/custom_env.go`.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `MULTICA_AGENT_ENV_ALLOWED_KEYS` | empty | Comma-separated exact key names and/or prefixes ending in `*` (e.g. `SLACK_WEBHOOK_URL,PROBE_*`). When set, every other key is refused. When empty, any key outside the fixed floor is accepted and the backend logs a warning at startup. |
+| `MULTICA_AGENT_ENV_ALLOWED_VALUES` | empty | Value pins: `;`-separated `KEY=VALUE\|VALUE` entries (e.g. `CLAUDE_CONFIG_DIR=/home/node/.claude-api\|/home/node/.claude-api-2`). A pinned key is accepted, on write and at claim, only when its value is byte-for-byte one of the listed values, even if the floor or the allow-list would refuse the key; any other value is refused with class `value_not_pinned`. |
+
+The fixed floor is refused whatever the allow-list says: daemon-owned names (`PATH`, `HOME`, `TMPDIR`, `MULTICA_*`, ...); keys that run code (`NODE_OPTIONS`, `LD_*`, `DYLD_*`, `PYTHON*`, `PERL5*`, `BASH_ENV`, `ENV`, `GIT_*`, `GOFLAGS`, editors, pagers, package-manager settings); config, home and data redirects (`*_HOME`, `*_CONFIG_DIR`, `XDG_*`, `KUBECONFIG`); network redirects (`*PROXY`, `*_BASE_URL`, `*_API_URL`, `*_ENDPOINT`, `*_HOST`, `OTEL_*`); TLS trust (`SSL_CERT_*`, `*_CA_BUNDLE`); credentials (`*_TOKEN`, `*_KEY`, `*_SECRET`, `*_PASSWORD`, `AWS_*`); and AI coding tool namespaces (`ANTHROPIC_*`, `CLAUDE_*`, `CODEX_*`, `OPENAI_*`, `GEMINI_*`, `HERMES_*`, `CURSOR_*`, `GH_*`, `GITHUB_*`, ...). Names must match `[A-Za-z_][A-Za-z0-9_]*`. The floor is a best effort over known classes; the allow-list is the control that does not depend on it being complete, so set it when agents on one runtime must not be able to influence another.
+
+A refused write returns `400` naming each key and its class. An allow-list entry the floor covers (`NODE_OPTIONS`, `GIT_*`, `*`) makes the backend refuse to start. Before you set or narrow the list, read each agent's keys (`multica agent env get <id>`, as a workspace owner/admin or the agent's owner) and include the ones still in use: keys outside the list are withheld from runs immediately (the backend logs `refused custom_env keys withheld from runtime` with the key names) and must be removed before that agent's env can be saved again.
+
+#### Value pins
+
+Some deployments route agents with a key the floor refuses. Pantheon's runtime, for example, sends an agent to a Claude API credits account instead of the runtime's OAuth login when the agent's `custom_env` sets `CLAUDE_CONFIG_DIR` to that account's directory. `MULTICA_AGENT_ENV_ALLOWED_VALUES` admits such a key for the exact values the operator lists and nothing else:
+
+```bash
+MULTICA_AGENT_ENV_ALLOWED_VALUES='CLAUDE_CONFIG_DIR=/home/node/.claude-api|/home/node/.claude-api-2'
+```
+
+- Values match byte for byte. The backend never normalises a path, so `/home/node/.claude-api/`, `/home/node/./.claude-api`, `/home/node/x/../.claude-api`, `/HOME/NODE/.claude-api`, `~/.claude-api` or a prefix of a listed value are all refused. The key name matches exactly too (`claude_config_dir` falls back to the floor).
+- A listed value must itself be the one canonical spelling: an empty value, surrounding whitespace, a control character, a trailing `/`, `//`, or a `.` or `..` path segment stops the backend from starting.
+- Only keys whose every floor class is a config/home/data redirect or an AI coding tool setting can be pinned. An entry for a key that runs code, redirects traffic, changes TLS trust, carries a credential, is daemon-owned or is not a valid name (`NODE_OPTIONS`, `LD_*`, `*_BASE_URL`, `*_PROXY`, `PATH`, `BASH_ENV`, `HOME`, `ANTHROPIC_API_KEY`, `OTEL_CONFIG_DIR`, ...) stops the backend from starting.
+- A pinned key does not need to be on `MULTICA_AGENT_ENV_ALLOWED_KEYS`; listing values for it is the allowance. Other keys are unaffected.
+- Pins are checked on `POST /api/agents`, on `PUT /api/agents/{id}/env` (against the merged map, so `****` keeps a stored value only if it is still pinned) and when a daemon claims a task. A stored value that is no longer pinned is withheld from the run, so remove a directory from the list only after no agent uses it.
+
+Set the pins before you deploy a backend with this rule if agents already use such a key: without them the key is refused on save and withheld at claim, and the agent runs on whatever the runtime's default is (for `CLAUDE_CONFIG_DIR`, the runtime's own login).
+
+This fork refuses `HERMES_HOME` and `CURSOR_MCP_AUTH_SOURCE` as config redirects, so the daemon's Hermes hint about setting `HERMES_HOME` in custom_env does not apply here; set it in the daemon's own environment instead.
+
+### Isolating runtimes from each other
+
+The custom_env rule limits what one key can do. Who may write the keys is decided by the credential each runtime holds. When two runtimes serve different trust zones (for example, different people's AI coding tool logins), make sure neither can write the other's agents:
+
+1. **One Multica user per runtime, with the `member` role.** Invite a dedicated user for each runtime and give it `member`, not `owner` or `admin`. `PUT /api/agents/{id}/env` admits only a workspace owner/admin or the agent's own owner, so a member PAT cannot touch agents it does not own.
+2. **One PAT per runtime, minted as that user.** Each daemon authenticates with its own user's PAT (never an owner's). Agents a runtime serves should be owned by that runtime's user: a private runtime only runs agents its owner owns, and an agent's owner can rewrite its env.
+3. **A real PostgreSQL password.** `POSTGRES_PASSWORD` defaults to `multica`. Anyone who reaches port 5432 with it can edit `agent.custom_env`, mint a PAT row for any user, or read webhook secrets directly. Generate one (`openssl rand -hex 24`), set it in `.env`, and change it in the running database with `ALTER USER multica PASSWORD '...'` before restarting the backend with the new `DATABASE_URL`.
+4. **PostgreSQL on a backend-only network.** In `docker-compose.selfhost.yml` the database shares the default compose network (`<project>_default`) with the backend. If runtimes or other untrusted containers join that network to reach the backend, give PostgreSQL its own `internal: true` network that only the backend joins, for example with a `docker-compose.override.yml`:
+
+   ```yaml
+   networks:
+     db:
+       internal: true
+   services:
+     postgres:
+       networks: [db]
+     backend:
+       networks: [default, db]
+   ```
+
+   Then confirm from a runtime container that `postgres:5432` no longer resolves or connects.
+
+#### What the server enforces per runtime
+
+With one user per runtime, the server keeps each runtime's user to its own runtimes and agents:
+
+- **Daemon routes act only for the caller's own runtimes.** A user credential (PAT or session JWT) on `/api/daemon/*` acts only for runtimes that same user owns: claim (`/runtimes/{id}/tasks/claim`, the batch `/tasks/claim` and the WebSocket claim), heartbeat, deregister, the WebSocket runtime set, the runtime result routes (models, local skills, update, recover-orphans) and every task route (status, start, progress, messages, usage, complete, fail, session, plugin hooks). Any other runtime or its tasks answer `404`. A runtime with no owner (registered with a daemon token) is open only to a workspace owner or admin. Without this, member A's PAT could claim member B's queued tasks: the claim hands over B's prompt and allow-listed `custom_env`, and mints a task token bound to B.
+- **A daemon_id cannot be taken over.** Registering with a `daemon_id` whose runtimes another user owns returns `403 daemon_id is registered to another user`, and the owner stays the same. A `daemon_id` is broadcast to workspace sockets, so knowing one proves nothing. `legacy_daemon_ids` fold in only runtimes the caller already owns. The owner of a runtime re-registering its own `daemon_id` (a reconnect) works as before.
+- **A task token never manages an agent.** A request made with an agent's `mat_` task token can't update (`custom_args`, `mcp_config`, `instructions`, `runtime_id`, model, ...), archive, restore, relabel or reassign skills on any agent, its own included. It gets `403`. `custom_env` and MCP library assignments already refused agents. People keep their powers: in the UI or CLI, an agent's owner can still edit it, and a workspace owner or admin can still edit any agent.
+- Daemon tokens (`mdt_`) are unchanged: they are bound to one workspace and one daemon id.
+
+**Until each runtime has its own user, this separates nothing.** If two runtimes register with the same PAT, both are owned by that one user. Every owner check then passes for both runtimes, and a task token from either can still be used on the other's agents through the same user. The protection takes effect only after the split in steps 1 and 2: give each runtime its own member user and PAT, move each runtime's agents to its user, and re-register each daemon with its own PAT. Do this in one drained window, because a private runtime runs only agents its owner owns. Re-registering a `daemon_id` under a different user is now refused. So when you split a runtime that was registered by the shared user, give it a new `daemon_id` (delete `~/.multica/daemon.id` in that runtime before it starts with the new PAT), or have a workspace owner or admin delete the old runtime row first, and then move its agents to the new runtime.
+
 ### WeCom frame tracing
 
 | Variable | Default | Description |

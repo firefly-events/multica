@@ -27,6 +27,7 @@ import (
 	"golang.org/x/sync/errgroup"
 	"golang.org/x/sync/singleflight"
 
+	"github.com/multica-ai/multica/server/internal/agentconfig"
 	"github.com/multica-ai/multica/server/internal/cli"
 	"github.com/multica-ai/multica/server/internal/daemon/execenv"
 	"github.com/multica-ai/multica/server/internal/daemon/repocache"
@@ -10324,17 +10325,11 @@ func socketSafeTempBaseDir() string {
 
 // isBlockedEnvKey returns true if the key must not be overridden by user-
 // configured custom_env. This prevents accidental or malicious override of
-// daemon-internal variables and critical system paths.
+// daemon-internal variables and critical system paths. The list lives in
+// agentconfig next to the server's wider custom_env rule, which refuses these
+// keys (and every other dangerous class) before they are stored or claimed.
 func isBlockedEnvKey(key string) bool {
-	upper := strings.ToUpper(key)
-	if strings.HasPrefix(upper, "MULTICA_") {
-		return true
-	}
-	switch upper {
-	case "HOME", "PATH", "USER", "SHELL", "TERM", "TMPDIR", "TMP", "TEMP", "CODEX_HOME", "REASONIX_STATE_HOME", "CURSOR_DATA_DIR", execenv.CursorMcpAuthSourceEnv, "OPENCLAW_CONFIG_PATH", "OPENCLAW_INCLUDE_ROOTS":
-		return true
-	}
-	return false
+	return agentconfig.IsDaemonReservedEnvKey(key)
 }
 
 // layerCustomEnvAndHermesHome applies the agent's custom_env onto the child env

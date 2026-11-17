@@ -78,6 +78,10 @@ func (h *Handler) buildDaemonWebSocketIdentity(w http.ResponseWriter, r *http.Re
 		if !h.requireDaemonWorkspaceAccess(w, r, workspaceID) {
 			return daemonws.ClientIdentity{}, false
 		}
+		if !h.daemonCallerMayActForRuntime(r, workspaceID, rt.OwnerID) {
+			writeError(w, http.StatusNotFound, "runtime not found")
+			return daemonws.ClientIdentity{}, false
+		}
 		if workspaceID != "" {
 			if _, ok := seenWorkspaceIDs[workspaceID]; !ok {
 				seenWorkspaceIDs[workspaceID] = struct{}{}

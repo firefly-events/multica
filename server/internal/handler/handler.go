@@ -18,6 +18,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/multica-ai/multica/server/internal/agentconfig"
 	"github.com/multica-ai/multica/server/internal/analytics"
 	"github.com/multica-ai/multica/server/internal/auth"
 	"github.com/multica-ai/multica/server/internal/cloudruntime"
@@ -109,6 +110,10 @@ type Config struct {
 	// webhook limiter from being bypassed by a spoofed XFF on deployments
 	// without a header-stripping reverse proxy in front.
 	TrustedProxies []netip.Prefix
+	// CustomEnvPolicy decides which agent custom_env keys may be stored and
+	// sent to a runtime. Populated from MULTICA_AGENT_ENV_ALLOWED_KEYS; the
+	// zero value applies only the fixed deny floor. See agentconfig.
+	CustomEnvPolicy agentconfig.CustomEnvPolicy
 	// CloudURL enables the SaaS-only multica-cloud connection when set. Empty
 	// keeps self-hosted deployments explicit: Cloud endpoints return 403 instead
 	// of attempting to dial a hard-coded private service.

@@ -35,9 +35,17 @@ WHERE id = ANY(@ids::uuid[]);
 -- WebSocket authenticates its whole runtime set in one round trip and then
 -- keeps these immutable ownership fields plus liveness state in its connection
 -- lease, avoiding a GetAgentRuntime call on every heartbeat.
-SELECT id, workspace_id, daemon_id, status, last_seen_at
+SELECT id, workspace_id, daemon_id, owner_id, status, last_seen_at
 FROM agent_runtime
 WHERE id = ANY(@ids::uuid[]);
+
+-- name: ListAgentRuntimeOwnersByDaemonID :many
+-- Every runtime row a daemon_id already holds in a workspace, with its owner.
+-- Registration reads it before the upsert so a user credential cannot claim a
+-- daemon_id (and with it the runtime rows) that another user registered.
+SELECT id, owner_id FROM agent_runtime
+WHERE workspace_id = @workspace_id
+  AND daemon_id = @daemon_id;
 
 -- name: LockAgentRuntime :one
 -- Acquires a row-level exclusive lock on the runtime row. Used at the
@@ -90,6 +98,13 @@ DO UPDATE SET
     owner_id = COALESCE(EXCLUDED.owner_id, agent_runtime.owner_id),
     last_seen_at = now(),
     updated_at = now()
+-- A user credential never takes over a runtime another user owns: re-sending
+-- that runtime's daemon_id must not move owner_id. The handler refuses first
+-- (ListAgentRuntimeOwnersByDaemonID); this predicate closes the race between
+-- that read and the write. A skipped update returns no row (pgx.ErrNoRows).
+WHERE agent_runtime.owner_id IS NULL
+   OR EXCLUDED.owner_id IS NULL
+   OR agent_runtime.owner_id = EXCLUDED.owner_id
 RETURNING *, (xmax = 0) AS inserted;
 
 -- name: UpsertAgentRuntimeWithProfile :one
@@ -124,6 +139,13 @@ DO UPDATE SET
     owner_id = COALESCE(EXCLUDED.owner_id, agent_runtime.owner_id),
     last_seen_at = now(),
     updated_at = now()
+-- A user credential never takes over a runtime another user owns: re-sending
+-- that runtime's daemon_id must not move owner_id. The handler refuses first
+-- (ListAgentRuntimeOwnersByDaemonID); this predicate closes the race between
+-- that read and the write. A skipped update returns no row (pgx.ErrNoRows).
+WHERE agent_runtime.owner_id IS NULL
+   OR EXCLUDED.owner_id IS NULL
+   OR agent_runtime.owner_id = EXCLUDED.owner_id
 RETURNING *, (xmax = 0) AS inserted;
 
 -- name: UpdateAgentRuntimeVisibility :one

@@ -115,7 +115,7 @@ Editing configuration does not change runs already running. Later runs use the a
 
 ## Environment variables and credentials
 
-Environment variables suit limited-privilege credentials the agent needs at run time, such as a read-only API key or a single-scope token.
+Environment variables suit plain settings the agent's own tools read at run time, such as a webhook URL or a log level.
 
 <Callout type="warning">
 **`custom_env` values are stored in plaintext in the Multica server database** — they are not "stays on this machine" data. Agent list and detail endpoints no longer return any env values, only an opaque count; only workspace `owner`s and `admin`s can unlock and modify values, and every read or change leaves an audit record. A running agent cannot call the admin endpoints to read another agent's variables.
@@ -123,7 +123,16 @@ Environment variables suit limited-privilege credentials the agent needs at run 
 
 Do not use production database admin passwords or other high-value long-lived credentials.
 
-Critical runtime variables such as `PATH`, `HOME`, and `MULTICA_*` cannot be overridden here.
+The server refuses keys that could change how the run itself behaves. Saving a set that contains one fails and names each key and the reason:
+
+- daemon-owned names: `PATH`, `HOME`, `TMPDIR`, `MULTICA_*` and similar;
+- keys that make a shell, interpreter or tool run other code: `NODE_OPTIONS`, `LD_*`, `PYTHON*`, `BASH_ENV`, `ENV`, `GIT_*`, editors, pagers and package-manager settings;
+- keys that move a tool's config, home or data: `*_HOME`, `*_CONFIG_DIR`, `XDG_*`;
+- keys that redirect traffic or change TLS trust: `*_PROXY`, `*_BASE_URL`, `*_API_URL`, `*_ENDPOINT`, `*_HOST`, `OTEL_*`, `SSL_CERT_*`, `*_CA_BUNDLE`;
+- credentials: `*_TOKEN`, `*_KEY`, `*_SECRET`, `*_PASSWORD`, `AWS_*`;
+- AI coding tool settings: `ANTHROPIC_*`, `CLAUDE_*`, `CODEX_*`, `OPENAI_*`, `GEMINI_*`, `HERMES_*`, `CURSOR_*` and the other supported tools' prefixes.
+
+Log the AI coding tool in on the runtime's machine instead of passing its credential here. A self-hosted server can also restrict keys to an allow-list, or accept a refused key such as `CLAUDE_CONFIG_DIR` only with exact values its operator lists; see [environment variables](/environment-variables#agent-environment-variables). A key saved before this rule existed is withheld from runs, and the variables cannot be saved again until it is removed.
 
 ## Custom arguments and MCP
 

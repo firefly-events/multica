@@ -62,7 +62,7 @@ func agentEnvOwnerFixture(t *testing.T, agentName, email string) (agentID, owner
 	ownerUserID = createPermissionTestMember(t, email)
 	agentID = createHandlerTestAgent(t, agentName, nil)
 	if _, err := testPool.Exec(context.Background(), `
-		UPDATE agent SET owner_id = $1, custom_env = '{"API_KEY":"secret-value"}' WHERE id = $2
+		UPDATE agent SET owner_id = $1, custom_env = '{"SLACK_WEBHOOK_URL":"secret-value"}' WHERE id = $2
 	`, ownerUserID, agentID); err != nil {
 		t.Fatalf("assign agent owner: %v", err)
 	}
@@ -92,11 +92,11 @@ func TestAgentEnv_AgentOwnerMemberCanRevealAndUpdate(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("decode reveal response: %v", err)
 	}
-	if resp.CustomEnv["API_KEY"] != "secret-value" {
-		t.Fatalf("expected plaintext API_KEY, got %v", resp.CustomEnv)
+	if resp.CustomEnv["SLACK_WEBHOOK_URL"] != "secret-value" {
+		t.Fatalf("expected plaintext SLACK_WEBHOOK_URL, got %v", resp.CustomEnv)
 	}
 
-	body := map[string]any{"custom_env": map[string]string{"API_KEY": "rotated-value"}}
+	body := map[string]any{"custom_env": map[string]string{"SLACK_WEBHOOK_URL": "rotated-value"}}
 	req = withURLParam(newRequestAs(ownerUserID, http.MethodPut, "/api/agents/"+agentID+"/env", body), "id", agentID)
 	w = httptest.NewRecorder()
 	testHandler.UpdateAgentEnv(w, req)
@@ -112,7 +112,7 @@ func TestAgentEnv_AgentOwnerMemberCanRevealAndUpdate(t *testing.T) {
 	if err := json.Unmarshal([]byte(stored), &got); err != nil {
 		t.Fatalf("decode stored custom_env: %v", err)
 	}
-	if got["API_KEY"] != "rotated-value" {
+	if got["SLACK_WEBHOOK_URL"] != "rotated-value" {
 		t.Errorf("expected the rotated value on disk, got %v", got)
 	}
 
@@ -152,7 +152,7 @@ func TestAgentEnv_UnrelatedMemberForbidden(t *testing.T) {
 		body any
 	}{
 		{"reveal", testHandler.GetAgentEnv, nil},
-		{"update", testHandler.UpdateAgentEnv, map[string]any{"custom_env": map[string]string{"API_KEY": "stolen"}}},
+		{"update", testHandler.UpdateAgentEnv, map[string]any{"custom_env": map[string]string{"SLACK_WEBHOOK_URL": "stolen"}}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -235,7 +235,7 @@ func TestAgentEnv_AgentActorRejectedForOwnedAgent(t *testing.T) {
 		body any
 	}{
 		{"reveal", testHandler.GetAgentEnv, nil},
-		{"update", testHandler.UpdateAgentEnv, map[string]any{"custom_env": map[string]string{"API_KEY": "exfiltrated"}}},
+		{"update", testHandler.UpdateAgentEnv, map[string]any{"custom_env": map[string]string{"SLACK_WEBHOOK_URL": "exfiltrated"}}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

@@ -1517,6 +1517,9 @@ func (h *Handler) CreateAgent(w http.ResponseWriter, r *http.Request) {
 		rc = []byte("{}")
 	}
 
+	if !h.requireAllowedCustomEnv(w, req.CustomEnv) {
+		return
+	}
 	ce, _ := json.Marshal(req.CustomEnv)
 	if req.CustomEnv == nil {
 		ce = []byte("{}")
@@ -1868,7 +1871,18 @@ func redactAgentResponseForActor(resp *AgentResponse, actorType string) {
 // canManageAgent checks whether the current user can update or archive an agent.
 // Only the agent owner or workspace owner/admin can manage any agent,
 // regardless of whether it is public or private.
+//
+// A task token (an agent acting through its run's mat_ credential) never
+// manages an agent, its own included: it carries its runtime owner's user id,
+// so the owner check alone let a run rewrite custom_args, mcp_config,
+// instructions or runtime of every agent that owner holds, and those fields
+// run code in the runtime that serves the agent. A human (PAT, JWT) keeps the
+// owner and owner/admin rules below.
 func (h *Handler) canManageAgent(w http.ResponseWriter, r *http.Request, agent db.Agent) bool {
+	if r.Header.Get("X-Actor-Source") == "task_token" {
+		writeError(w, http.StatusForbidden, "an agent task token cannot manage agents")
+		return false
+	}
 	wsID := uuidToString(agent.WorkspaceID)
 	member, ok := h.requireWorkspaceRole(w, r, wsID, "agent not found", "owner", "admin", "member")
 	if !ok {

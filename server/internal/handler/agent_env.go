@@ -204,6 +204,11 @@ func (h *Handler) UpdateAgentEnv(w http.ResponseWriter, r *http.Request) {
 
 	existing := unmarshalCustomEnv(agent)
 	merged, audit := mergeAgentEnv(existing, req.CustomEnv)
+	// Check the map that would be stored, not just the request: a key the
+	// rule refuses cannot be kept with the **** marker either.
+	if !h.requireAllowedCustomEnv(w, merged) {
+		return
+	}
 
 	envBytes, err := json.Marshal(merged)
 	if err != nil {
@@ -346,6 +351,32 @@ func mergeAgentEnv(existing, request map[string]string) (map[string]string, envA
 	sort.Strings(audit.changed)
 	sort.Strings(audit.preserved)
 	return merged, audit
+}
+
+// requireAllowedCustomEnv applies the server's custom_env rule
+// (agentconfig.CustomEnvPolicy) to a map about to be stored. Every handler
+// that writes custom_env calls it, so the rule is enforced in one place. On
+// refusal it writes a 400 naming each refused key and its class, and returns
+// false.
+func (h *Handler) requireAllowedCustomEnv(w http.ResponseWriter, env map[string]string) bool {
+	if err := h.cfg.CustomEnvPolicy.Validate(env); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return false
+	}
+	return true
+}
+
+// filterCustomEnvForDaemon drops the keys the rule refuses from a stored
+// custom_env before it is sent to a runtime. Rows the API wrote already pass;
+// this catches rows written another way (directly in the database, or before
+// the rule existed) and keys a narrowed allow-list no longer admits.
+func (h *Handler) filterCustomEnvForDaemon(agentID string, env map[string]string) map[string]string {
+	kept, dropped := h.cfg.CustomEnvPolicy.Filter(env)
+	if len(dropped) > 0 {
+		slog.Warn("daemon claim: refused custom_env keys withheld from runtime",
+			"agent_id", agentID, "keys", dropped)
+	}
+	return kept
 }
 
 // unmarshalCustomEnv decodes an agent's stored custom_env bytea into a
