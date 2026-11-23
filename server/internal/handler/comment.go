@@ -2428,7 +2428,7 @@ func (h *Handler) mergeCommentIntoPendingTask(ctx context.Context, issue db.Issu
 // for a comment on the same (issue, agent) to fold into it rather than start
 // its own run (PANT-1442). A reassign followed by an instruction comment, or a
 // note sent alongside the reassign, is one handoff and gets one run.
-const runTriggerCoalesceWindowSecs = 60
+const runTriggerCoalesceWindowSecs = int32(service.RunTriggerCoalesceWindow / time.Second)
 
 // coalescedWithAssignmentNote is appended to trigger_summary when a comment
 // folds into a recent assignment run, so the run record shows why there was
