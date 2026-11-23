@@ -1944,6 +1944,112 @@ func (q *Queries) ClearAgentThinkingLevel(ctx context.Context, id pgtype.UUID) (
 	return i, err
 }
 
+const coalesceAssignmentIntoRecentTask = `-- name: CoalesceAssignmentIntoRecentTask :one
+UPDATE agent_task_queue
+SET trigger_summary = concat_ws(' ', NULLIF(trigger_summary, ''), $1::text)
+WHERE id = (
+    SELECT t.id FROM agent_task_queue t
+    WHERE t.context->>'wakeup_id' IS NULL AND t.issue_id = $2
+      AND t.agent_id = $3
+      AND t.status IN ('queued', 'dispatched', 'running', 'waiting_local_directory')
+      AND t.created_at > now() - make_interval(secs => $4::int)
+      AND (
+          COALESCE($5::text, '') = ''
+          OR t.context->>'head_sha' = $5::text
+      )
+    ORDER BY t.created_at DESC
+    LIMIT 1
+)
+RETURNING id, agent_id, issue_id, status, priority, dispatched_at, started_at, completed_at, result, error, created_at, context, runtime_id, session_id, work_dir, trigger_comment_id, chat_session_id, autopilot_run_id, attempt, max_attempts, parent_task_id, failure_reason, trigger_summary, force_fresh_session, is_leader_task, wait_reason, initiator_user_id, handoff_note, prepare_lease_expires_at, squad_id, runtime_mcp_overlay, escalation_for_task_id, fire_at, originator_user_id, runtime_connected_apps, coalesced_comment_ids, delivered_comment_ids, chat_input_task_id, chat_finalize_deferred_at, originator_source, delegated_from_task_id, retry_of_task_id, rerun_of_task_id, rule_version_id, trigger_evidence_kind, trigger_evidence_ref_id, accountable_user_id, session_rollout_missing, retired_session_id, quick_actions_disabled, regenerate_quick_actions_for, branch_name, durable_work_dir, channel_context_revision, comment_thread_id, cancelled_by_type, cancelled_by_id, cancelled_by_name, issue_snapshot, last_heartbeat_at
+`
+
+type CoalesceAssignmentIntoRecentTaskParams struct {
+	Note       string      `json:"note"`
+	IssueID    pgtype.UUID `json:"issue_id"`
+	AgentID    pgtype.UUID `json:"agent_id"`
+	WindowSecs int32       `json:"window_secs"`
+	HeadSha    pgtype.Text `json:"head_sha"`
+}
+
+// PANT-1442: an assignment that arrives within @window_secs of a task the same
+// agent already holds for the issue (queued, claimed, or running, any thread)
+// does not start a second run. The newest such task absorbs the assignment and
+// records it in trigger_summary. Head-scoped like the pending dedup (TEN-356):
+// a task stamped for a different head_sha never absorbs a new-HEAD assignment.
+func (q *Queries) CoalesceAssignmentIntoRecentTask(ctx context.Context, arg CoalesceAssignmentIntoRecentTaskParams) (AgentTaskQueue, error) {
+	row := q.db.QueryRow(ctx, coalesceAssignmentIntoRecentTask,
+		arg.Note,
+		arg.IssueID,
+		arg.AgentID,
+		arg.WindowSecs,
+		arg.HeadSha,
+	)
+	var i AgentTaskQueue
+	err := row.Scan(
+		&i.ID,
+		&i.AgentID,
+		&i.IssueID,
+		&i.Status,
+		&i.Priority,
+		&i.DispatchedAt,
+		&i.StartedAt,
+		&i.CompletedAt,
+		&i.Result,
+		&i.Error,
+		&i.CreatedAt,
+		&i.Context,
+		&i.RuntimeID,
+		&i.SessionID,
+		&i.WorkDir,
+		&i.TriggerCommentID,
+		&i.ChatSessionID,
+		&i.AutopilotRunID,
+		&i.Attempt,
+		&i.MaxAttempts,
+		&i.ParentTaskID,
+		&i.FailureReason,
+		&i.TriggerSummary,
+		&i.ForceFreshSession,
+		&i.IsLeaderTask,
+		&i.WaitReason,
+		&i.InitiatorUserID,
+		&i.HandoffNote,
+		&i.PrepareLeaseExpiresAt,
+		&i.SquadID,
+		&i.RuntimeMcpOverlay,
+		&i.EscalationForTaskID,
+		&i.FireAt,
+		&i.OriginatorUserID,
+		&i.RuntimeConnectedApps,
+		&i.CoalescedCommentIds,
+		&i.DeliveredCommentIds,
+		&i.ChatInputTaskID,
+		&i.ChatFinalizeDeferredAt,
+		&i.OriginatorSource,
+		&i.DelegatedFromTaskID,
+		&i.RetryOfTaskID,
+		&i.RerunOfTaskID,
+		&i.RuleVersionID,
+		&i.TriggerEvidenceKind,
+		&i.TriggerEvidenceRefID,
+		&i.AccountableUserID,
+		&i.SessionRolloutMissing,
+		&i.RetiredSessionID,
+		&i.QuickActionsDisabled,
+		&i.RegenerateQuickActionsFor,
+		&i.BranchName,
+		&i.DurableWorkDir,
+		&i.ChannelContextRevision,
+		&i.CommentThreadID,
+		&i.CancelledByType,
+		&i.CancelledByID,
+		&i.CancelledByName,
+		&i.IssueSnapshot,
+		&i.LastHeartbeatAt,
+	)
+	return i, err
+}
+
 const completeAgentTask = `-- name: CompleteAgentTask :one
 UPDATE agent_task_queue
 SET status = 'completed', completed_at = now(), result = $2,
@@ -7088,7 +7194,22 @@ WHERE id = (
     SELECT t.id FROM agent_task_queue t
     WHERE t.context->>'wakeup_id' IS NULL AND t.issue_id = $12
       AND t.agent_id = $13
-      AND t.comment_thread_id IS NOT DISTINCT FROM comment_thread_root_id($1::uuid)
+      AND (
+          (
+              $14::int IS NULL
+              AND t.comment_thread_id IS NOT DISTINCT FROM comment_thread_root_id($1::uuid)
+          )
+          -- PANT-1442: with a window, the target is instead a comment-less
+          -- (assignment-level) task created within that many seconds. Setting its
+          -- trigger_comment_id moves it into the comment's thread, so a reassign
+          -- followed by an instruction comment starts ONE run, not one per slot.
+          OR (
+              $14::int IS NOT NULL
+              AND t.trigger_comment_id IS NULL
+              AND t.comment_thread_id IS NULL
+              AND t.created_at > now() - make_interval(secs => $14::int)
+          )
+      )
       AND (
           t.status = 'queued'
           OR (t.status = 'deferred' AND t.context->>'channel_issue_media_pending' = 'true')
@@ -7099,8 +7220,8 @@ WHERE id = (
       -- into it would give a new-HEAD comment old-HEAD review coverage. Empty/
       -- absent head_sha (no linked PR) matches any task, preserving coalescing.
       AND (
-          COALESCE($14::text, '') = ''
-          OR t.context->>'head_sha' = $14::text
+          COALESCE($15::text, '') = ''
+          OR t.context->>'head_sha' = $15::text
       )
     ORDER BY t.created_at DESC
     LIMIT 1
@@ -7122,6 +7243,7 @@ type MergeCommentIntoPendingTaskParams struct {
 	NewRuntimeConnectedApps []byte      `json:"new_runtime_connected_apps"`
 	IssueID                 pgtype.UUID `json:"issue_id"`
 	AgentID                 pgtype.UUID `json:"agent_id"`
+	AssignmentWindowSecs    pgtype.Int4 `json:"assignment_window_secs"`
 	HeadSha                 pgtype.Text `json:"head_sha"`
 }
 
@@ -7187,6 +7309,7 @@ func (q *Queries) MergeCommentIntoPendingTask(ctx context.Context, arg MergeComm
 		arg.NewRuntimeConnectedApps,
 		arg.IssueID,
 		arg.AgentID,
+		arg.AssignmentWindowSecs,
 		arg.HeadSha,
 	)
 	var i MergeCommentIntoPendingTaskRow
