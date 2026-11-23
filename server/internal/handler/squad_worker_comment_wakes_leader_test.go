@@ -139,9 +139,11 @@ func TestCreateComment_WorkerAgentCommentQueuesSeparatelyFromLeaderAssignment(t 
 	if err := testPool.QueryRow(ctx, `SELECT runtime_id FROM agent WHERE id = $1`, fx.LeaderID).Scan(&leaderRuntimeID); err != nil {
 		t.Fatalf("load leader runtime: %v", err)
 	}
+	// Older than the PANT-1442 coalescing window, so the new thread is not
+	// folded into it as a just-made assignment would be.
 	if _, err := testPool.Exec(ctx, `
-		INSERT INTO agent_task_queue (agent_id, runtime_id, issue_id, status, is_leader_task, originator_user_id, accountable_user_id)
-		VALUES ($1, $2, $3, 'queued', TRUE, $4, $4)
+		INSERT INTO agent_task_queue (agent_id, runtime_id, issue_id, status, is_leader_task, originator_user_id, accountable_user_id, created_at)
+		VALUES ($1, $2, $3, 'queued', TRUE, $4, $4, now() - interval '2 minutes')
 	`, fx.LeaderID, leaderRuntimeID, issueID, testUserID); err != nil {
 		t.Fatalf("seed queued leader task: %v", err)
 	}
