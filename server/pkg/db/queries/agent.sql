@@ -662,6 +662,20 @@ WHERE issue_id = $1 AND agent_id = $2
   AND comment_thread_id IS NOT DISTINCT FROM comment_thread_root_id(sqlc.narg('thread_comment_id')::uuid)
 RETURNING *;
 
+-- name: CancelQueuedTasksByIssueAndAgent :many
+-- Cancels one agent's not-yet-claimed (queued / deferred) tasks on an issue.
+-- Called when an issue leaves in_review or its assignee changes, for the agent
+-- that held it (pantheon-v2#589): those runs were planned for a state the issue
+-- is no longer in. Dispatched and running rows are deliberately left alone —
+-- interrupting work in flight is CancelTask's job (MUL-4113), and the agent
+-- making the change may itself be the running task.
+UPDATE agent_task_queue
+SET status = 'cancelled', completed_at = now(), prepare_lease_expires_at = NULL,
+    cancelled_by_type = 'system', cancelled_by_id = NULL, cancelled_by_name = NULL
+WHERE issue_id = $1 AND agent_id = $2
+  AND status IN ('queued', 'deferred')
+RETURNING *;
+
 -- name: CancelAgentTasksByAgent :many
 -- Bulk-cancel every active (queued/dispatched/running) task for an agent.
 -- Returns the affected rows so callers can broadcast task:cancelled events.
@@ -824,7 +838,13 @@ WHERE id = (
               )
             )
       )
-    ORDER BY atq.priority DESC, atq.created_at ASC, atq.id ASC
+    -- Queue aging (pantheon-v2#589): each hour a row waits adds
+    -- @priority_aging_per_hour to its priority, so a steady stream of newer,
+    -- higher-priority rows cannot starve an older lower-priority one forever.
+    -- 0 restores strict priority-then-age order.
+    ORDER BY (atq.priority + sqlc.arg(priority_aging_per_hour)::float8
+                 * (EXTRACT(EPOCH FROM now() - atq.created_at)::float8 / 3600.0)) DESC,
+             atq.created_at ASC, atq.id ASC
     LIMIT 1
     FOR UPDATE SKIP LOCKED
 )

@@ -3574,8 +3574,9 @@ func (s *TaskService) claimTask(ctx context.Context, agentID, runtimeID pgtype.U
 		task, err := qtx.ClaimAgentTask(ctx, db.ClaimAgentTaskParams{
 			AgentID:          agentID,
 			RuntimeID:        claimRuntimeID,
-			PrepareLeaseSecs: prepareLeaseDuration.Seconds(),
-			RuntimeStaleSecs: RuntimeClaimFreshnessSeconds,
+			PrepareLeaseSecs:     prepareLeaseDuration.Seconds(),
+			RuntimeStaleSecs:     RuntimeClaimFreshnessSeconds,
+			PriorityAgingPerHour: PriorityAgingPerHour,
 		})
 		claimAgentMs = time.Since(t0).Milliseconds()
 		if err != nil {
