@@ -1025,6 +1025,37 @@ func TestLoadConfig_OpenCodeIdleWatchdog(t *testing.T) {
 	}
 }
 
+func TestLoadConfig_CodexIdleWatchdog(t *testing.T) {
+	stageFakeAgent(t)
+	load := func(t *testing.T) Config {
+		t.Helper()
+		cfg, err := LoadConfig(Overrides{
+			ServerURL:      "http://localhost:8080",
+			WorkspacesRoot: t.TempDir(),
+		})
+		if err != nil {
+			t.Fatalf("LoadConfig: %v", err)
+		}
+		return cfg
+	}
+
+	// Off by default: existing deployments keep today's Codex timeouts.
+	t.Setenv("MULTICA_CODEX_IDLE_WATCHDOG", "")
+	if got := load(t).CodexIdleWatchdog; got != 0 {
+		t.Fatalf("CodexIdleWatchdog = %s, want 0 (disabled) by default", got)
+	}
+
+	t.Setenv("MULTICA_CODEX_IDLE_WATCHDOG", "20m")
+	if got := load(t).CodexIdleWatchdog; got != 20*time.Minute {
+		t.Fatalf("CodexIdleWatchdog = %s, want 20m from env", got)
+	}
+
+	t.Setenv("MULTICA_CODEX_IDLE_WATCHDOG", "nope")
+	if _, err := LoadConfig(Overrides{ServerURL: "http://localhost:8080", WorkspacesRoot: t.TempDir()}); err == nil {
+		t.Fatal("LoadConfig accepted an invalid MULTICA_CODEX_IDLE_WATCHDOG")
+	}
+}
+
 // TestLoadConfig_AutoUpdateDefault_CloudOn confirms the symmetric case: a
 // daemon pointed at Multica's hosted cloud keeps the historical opt-in
 // auto-update default. We pass the WSS form of the URL to also exercise that
