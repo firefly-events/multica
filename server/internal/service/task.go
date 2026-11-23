@@ -5224,6 +5224,7 @@ var retryableReasons = map[string]bool{
 	"codex_semantic_inactivity":                      true,
 	string(taskfailure.ReasonAgentProviderNetwork):   true,
 	string(taskfailure.ReasonSkillBundleUnavailable): true,
+	string(taskfailure.ReasonEgressDegraded):         true,
 }
 
 // runtime_offline retries start deferred, not queued: their positive fire_at
@@ -5238,10 +5239,21 @@ var retryableReasons = map[string]bool{
 // A blip that survives the immediate retry gets a short cooldown before the
 // final attempt instead of firing back-to-back. Every other retryable reason
 // keeps the task's generic max_attempts ceiling and retries immediately.
+//
+// egress_degraded (pantheon-v2 #540) is the daemon telling us the host's
+// network was down when the task failed. It must not consume an attempt, so
+// its ceiling is the task's max_attempts plus one: the child is created at
+// attempt+1 with max_attempts+1, leaving the remaining budget exactly where it
+// was. The child is deferred by the breaker's probe interval so it does not
+// race a still-dead network; the daemon will not claim it on a degraded
+// runtime anyway. egressDegradedAttemptCap bounds the chain so a breaker that
+// never closes cannot grow it forever.
 const (
 	runtimeOfflineRetryDeferral   = time.Second
 	providerNetworkMaxAttempts    = 3
 	providerNetworkFinalRetryWait = 5 * time.Second
+	egressDegradedRetryDeferral   = 30 * time.Second
+	egressDegradedAttemptCap      = 48
 )
 
 // retryAttemptCeiling reports how many attempts the auto-retry path allows for
@@ -5262,6 +5274,9 @@ func retryAttemptCeiling(reason string, taskMaxAttempts int32) int32 {
 	if reason == string(taskfailure.ReasonAgentProviderNetwork) && taskMaxAttempts < providerNetworkMaxAttempts {
 		return providerNetworkMaxAttempts
 	}
+	if reason == string(taskfailure.ReasonEgressDegraded) && taskMaxAttempts > 1 {
+		return min(taskMaxAttempts+1, max(taskMaxAttempts, egressDegradedAttemptCap))
+	}
 	return taskMaxAttempts
 }
 
@@ -5274,6 +5289,9 @@ func retryAttemptCeiling(reason string, taskMaxAttempts int32) int32 {
 func retryDelayForAttempt(reason string, failedAttempt int32) time.Duration {
 	if reason == string(taskfailure.ReasonRuntimeOffline) {
 		return runtimeOfflineRetryDeferral
+	}
+	if reason == string(taskfailure.ReasonEgressDegraded) {
+		return egressDegradedRetryDeferral
 	}
 	if reason == string(taskfailure.ReasonAgentProviderNetwork) &&
 		failedAttempt >= providerNetworkMaxAttempts-1 {

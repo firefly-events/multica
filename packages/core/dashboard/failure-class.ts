@@ -76,6 +76,10 @@ const REASON_CLASS: Record<string, FailureClass> = {
   // arrive as agent_error.* and inflated the agent class with problems only a
   // machine owner can fix (#7913).
   environment_prepare_failed: "runtime",
+  // The daemon's egress circuit breaker was open: the host lost DNS or
+  // outbound connectivity, so the run never reached the provider. Retried
+  // without consuming an attempt; the fix is the host's network.
+  egress_degraded: "runtime",
 
   // The agent process itself produced the failure.
   "agent_error.process_failure": "agent",

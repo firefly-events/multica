@@ -514,3 +514,49 @@ func TestContextOverflowFromLegacyDaemonRetiresSession(t *testing.T) {
 		t.Errorf("an overflow reported by a current daemon must retire the session; got reason %q", current)
 	}
 }
+
+// egress_degraded (pantheon-v2 #540): a failure recorded while the daemon's
+// egress breaker was open retries without consuming an attempt — the child's
+// ceiling is widened by exactly one — is deferred past one probe interval,
+// keeps the "retry disabled" contract, and is bounded by a hard cap.
+func TestEgressDegradedRetryDoesNotConsumeAttempts(t *testing.T) {
+	const egress = "egress_degraded"
+	if !retryableReasons[egress] {
+		t.Fatal("egress_degraded must be retryable")
+	}
+	for _, tc := range []struct {
+		max, want int32
+	}{
+		{2, 3},
+		{3, 4},
+		{1, 1}, // retry disabled → stays disabled
+		{egressDegradedAttemptCap, egressDegradedAttemptCap},
+		{egressDegradedAttemptCap + 5, egressDegradedAttemptCap + 5}, // never narrows
+	} {
+		if got := retryAttemptCeiling(egress, tc.max); got != tc.want {
+			t.Errorf("ceiling(egress, %d) = %d, want %d", tc.max, got, tc.want)
+		}
+	}
+	if got := retryDelayForAttempt(egress, 1); got != egressDegradedRetryDeferral {
+		t.Errorf("egress delay = %s, want %s", got, egressDegradedRetryDeferral)
+	}
+
+	// Walk a chain: an issue on its LAST attempt (2/2) whose task keeps failing
+	// during an outage keeps getting retried, and once the network is back the
+	// child still holds one remaining attempt — the outage cost nothing.
+	task := db.AgentTaskQueue{Attempt: 2, MaxAttempts: 2, IssueID: pgtype.UUID{Bytes: [16]byte{1}, Valid: true}}
+	for range 5 {
+		if !retryEligible(egress, task) {
+			t.Fatalf("egress failure at attempt %d/%d not retried", task.Attempt, task.MaxAttempts)
+		}
+		task.MaxAttempts = retryAttemptCeiling(egress, task.MaxAttempts)
+		task.Attempt++
+	}
+	if remaining := task.MaxAttempts - task.Attempt; remaining != 0 {
+		t.Errorf("remaining budget after outage = %d, want 0 (same as before: last attempt)", remaining)
+	}
+	// The same last-attempt task failing for a real reason is not retried.
+	if retryEligible("timeout", db.AgentTaskQueue{Attempt: 2, MaxAttempts: 2, IssueID: task.IssueID}) {
+		t.Error("ordinary failure on last attempt must not retry")
+	}
+}
