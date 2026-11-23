@@ -176,6 +176,15 @@ const (
 	// only repeat an isolation failure.
 	ReasonInvalidTaskIdentity Reason = "invalid_task_identity"
 
+	// ReasonEgressDegraded: the daemon's egress circuit breaker was open for
+	// this task's runtime when the task failed — the host had lost DNS or
+	// outbound connectivity to its provider, so the failure says nothing about
+	// the work (pantheon-v2 #540). Platform-side and retryable WITHOUT
+	// consuming an attempt: the retry child's max_attempts is widened by one so
+	// the remaining budget is unchanged, and it is deferred until the breaker
+	// has had a chance to probe. Written by the daemon in reportTaskResult.
+	ReasonEgressDegraded Reason = "egress_degraded"
+
 	// ReasonRuntimeAccessDenied: the daemon refused a claimed task because
 	// a private runtime does not authorize the task's agent — the runtime
 	// owner and the agent owner differ, a private owned runtime was paired
@@ -290,6 +299,7 @@ var allReasons = []Reason{
 	ReasonRuntimeCLITimeout,
 	ReasonEnvironmentPrepareFailed,
 	ReasonInvalidTaskIdentity,
+	ReasonEgressDegraded,
 	ReasonRuntimeAccessDenied,
 
 	// Agent process side: provider errors.
