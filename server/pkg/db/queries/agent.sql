@@ -1959,7 +1959,22 @@ WHERE id = (
     SELECT t.id FROM agent_task_queue t
     WHERE t.context->>'wakeup_id' IS NULL AND t.issue_id = @issue_id
       AND t.agent_id = @agent_id
-      AND t.comment_thread_id IS NOT DISTINCT FROM comment_thread_root_id(@new_trigger_comment_id::uuid)
+      AND (
+          (
+              sqlc.narg('assignment_window_secs')::int IS NULL
+              AND t.comment_thread_id IS NOT DISTINCT FROM comment_thread_root_id(@new_trigger_comment_id::uuid)
+          )
+          -- PANT-1442: with a window, the target is instead a comment-less
+          -- (assignment-level) task created within that many seconds. Setting its
+          -- trigger_comment_id moves it into the comment's thread, so a reassign
+          -- followed by an instruction comment starts ONE run, not one per slot.
+          OR (
+              sqlc.narg('assignment_window_secs')::int IS NOT NULL
+              AND t.trigger_comment_id IS NULL
+              AND t.comment_thread_id IS NULL
+              AND t.created_at > now() - make_interval(secs => sqlc.narg('assignment_window_secs')::int)
+          )
+      )
       AND (
           t.status = 'queued'
           OR (t.status = 'deferred' AND t.context->>'channel_issue_media_pending' = 'true')
@@ -1977,6 +1992,29 @@ WHERE id = (
     LIMIT 1
 )
 RETURNING id, coalesced_comment_ids;
+
+-- name: CoalesceAssignmentIntoRecentTask :one
+-- PANT-1442: an assignment that arrives within @window_secs of a task the same
+-- agent already holds for the issue (queued, claimed, or running, any thread)
+-- does not start a second run. The newest such task absorbs the assignment and
+-- records it in trigger_summary. Head-scoped like the pending dedup (TEN-356):
+-- a task stamped for a different head_sha never absorbs a new-HEAD assignment.
+UPDATE agent_task_queue
+SET trigger_summary = concat_ws(' ', NULLIF(trigger_summary, ''), @note::text)
+WHERE id = (
+    SELECT t.id FROM agent_task_queue t
+    WHERE t.context->>'wakeup_id' IS NULL AND t.issue_id = @issue_id
+      AND t.agent_id = @agent_id
+      AND t.status IN ('queued', 'dispatched', 'running', 'waiting_local_directory')
+      AND t.created_at > now() - make_interval(secs => @window_secs::int)
+      AND (
+          COALESCE(sqlc.narg('head_sha')::text, '') = ''
+          OR t.context->>'head_sha' = sqlc.narg('head_sha')::text
+      )
+    ORDER BY t.created_at DESC
+    LIMIT 1
+)
+RETURNING *;
 
 -- name: RegisterPlannedCommentForActiveTask :one
 -- #5914: durably register a comment that lost an enqueue race as a PLANNED

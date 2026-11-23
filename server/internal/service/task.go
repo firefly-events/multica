@@ -1196,8 +1196,56 @@ func (s *TaskService) EnqueueTaskForIssueByActor(ctx context.Context, issue db.I
 // variant used when an installed client still sends handoff_note. The note is
 // persisted on the task so both old and current daemons can render it in the
 // run's opening prompt. Empty text behaves like EnqueueTaskForIssueByActor.
+//
+// An assignment within RunTriggerCoalesceWindow of a task the agent already
+// holds for the issue starts no second run (PANT-1442); see
+// coalesceAssignmentIntoRecentTask. A handoff note always gets its own run,
+// since only a fresh task can carry it.
 func (s *TaskService) EnqueueTaskForIssueWithHandoff(ctx context.Context, issue db.Issue, handoffNote string, actorUserID pgtype.UUID) (db.AgentTaskQueue, error) {
+	if handoffNote == "" {
+		if task, ok := s.coalesceAssignmentIntoRecentTask(ctx, issue); ok {
+			return task, nil
+		}
+	}
 	return s.enqueueIssueTask(ctx, issue, pgtype.UUID{}, false, handoffNote, actorUserID, pgtype.UUID{}, pgtype.Timestamptz{}, OriginDerived)
+}
+
+// RunTriggerCoalesceWindow is how close together two run triggers for the
+// same (issue, agent) must be to count as one handoff (PANT-1442).
+const RunTriggerCoalesceWindow = 60 * time.Second
+
+// coalescedAssignmentNote is appended to the absorbing task's trigger_summary.
+const coalescedAssignmentNote = "(coalesced: assignment arrived within 60s of this run)"
+
+// coalesceAssignmentIntoRecentTask lets the newest queued, claimed, or running
+// task of the assigned agent on this issue absorb the assignment when it was
+// created within RunTriggerCoalesceWindow, typically the run a comment or
+// mention started moments before the reassign landed. ok=false means no such
+// task exists (or the lookup failed) and the caller enqueues as usual.
+func (s *TaskService) coalesceAssignmentIntoRecentTask(ctx context.Context, issue db.Issue) (db.AgentTaskQueue, bool) {
+	if issue.AssigneeType.String != "agent" || !issue.AssigneeID.Valid {
+		return db.AgentTaskQueue{}, false
+	}
+	task, err := s.Queries.CoalesceAssignmentIntoRecentTask(ctx, db.CoalesceAssignmentIntoRecentTaskParams{
+		Note:       coalescedAssignmentNote,
+		IssueID:    issue.ID,
+		AgentID:    issue.AssigneeID,
+		WindowSecs: int32(RunTriggerCoalesceWindow / time.Second),
+		HeadSha:    s.ResolveIssueReviewSHAParam(ctx, issue.ID),
+	})
+	if err != nil {
+		if !errors.Is(err, pgx.ErrNoRows) {
+			slog.Warn("coalesce assignment into recent task failed; enqueueing",
+				"issue_id", util.UUIDToString(issue.ID), "error", err)
+		}
+		return db.AgentTaskQueue{}, false
+	}
+	slog.Info("coalesced assignment into recent task",
+		"task_id", util.UUIDToString(task.ID),
+		"issue_id", util.UUIDToString(issue.ID),
+		"agent_id", util.UUIDToString(issue.AssigneeID),
+		"task_status", task.Status)
+	return task, true
 }
 
 // enqueueIssueTask is the shared implementation behind EnqueueTaskForIssue

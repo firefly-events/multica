@@ -1049,9 +1049,12 @@ func TestPreviewCommentTriggers_AllSuppressesAssigneeAndNewThreadQueuesSeparatel
 		t.Fatalf("@all preview agents = %d, want 0: %+v", got, allPreview.Agents)
 	}
 
+	// Older than the PANT-1442 coalescing window: a comment right after the
+	// assignment folds into it (run_trigger_coalesce_test.go); a later new
+	// thread still gets its own run.
 	if _, err := testPool.Exec(ctx, `
-		INSERT INTO agent_task_queue (agent_id, runtime_id, issue_id, status)
-		VALUES ($1, $2, $3, 'queued')
+		INSERT INTO agent_task_queue (agent_id, runtime_id, issue_id, status, created_at)
+		VALUES ($1, $2, $3, 'queued', now() - interval '2 minutes')
 	`, agentID, handlerTestRuntimeID(t), issueID); err != nil {
 		t.Fatalf("seed queued task: %v", err)
 	}

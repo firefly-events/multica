@@ -2215,6 +2215,16 @@ func (h *Handler) resolveCommentTriggerEnqueue(ctx context.Context, issue db.Iss
 				// no-blocker case; we simply never PROMISE it.)
 			}
 		}
+		// (e) PANT-1442: an assignment run queued moments ago sits in the
+		// thread-less slot, so it never collides with this comment's thread.
+		// Fold the comment into it instead of starting a second run.
+		if !lostRace {
+			if status, reason, terminal := commentMergeTerminalOutcome(
+				h.mergeCommentIntoTask(ctx, issue, trigger, triggerCommentID, getHeadSha(), runTriggerCoalesceWindowSecs),
+			); terminal {
+				return status, reason
+			}
+		}
 		if err := h.enqueueSingleCommentTrigger(ctx, issue, triggerCommentID, trigger); err != nil {
 			// Lost the enqueue race: a sibling task for this (issue, agent) now
 			// exists. Re-resolve as pending so the next attempt folds this
@@ -2411,6 +2421,25 @@ func commentMergeTerminalOutcome(result commentMergeResult) (status DispatchStat
 // member created, the coalescing run carrying the latest instruction's
 // originator and matching connected-app overlay.
 func (h *Handler) mergeCommentIntoPendingTask(ctx context.Context, issue db.Issue, trigger commentAgentTrigger, newTriggerCommentID pgtype.UUID, headSha pgtype.Text) commentMergeResult {
+	return h.mergeCommentIntoTask(ctx, issue, trigger, newTriggerCommentID, headSha, 0)
+}
+
+// runTriggerCoalesceWindowSecs is how recent an assignment-level task must be
+// for a comment on the same (issue, agent) to fold into it rather than start
+// its own run (PANT-1442). A reassign followed by an instruction comment, or a
+// note sent alongside the reassign, is one handoff and gets one run.
+const runTriggerCoalesceWindowSecs = int32(service.RunTriggerCoalesceWindow / time.Second)
+
+// coalescedWithAssignmentNote is appended to trigger_summary when a comment
+// folds into a recent assignment run, so the run record shows why there was
+// only one.
+const coalescedWithAssignmentNote = "(coalesced: comment arrived within 60s of the assignment run)"
+
+// mergeCommentIntoTask is mergeCommentIntoPendingTask with an optional
+// assignment window. windowSecs == 0 targets the comment's own thread; a
+// positive window targets a comment-less assignment task created within that
+// many seconds instead (PANT-1442).
+func (h *Handler) mergeCommentIntoTask(ctx context.Context, issue db.Issue, trigger commentAgentTrigger, newTriggerCommentID pgtype.UUID, headSha pgtype.Text, windowSecs int32) commentMergeResult {
 	// Re-attribute the coalescing run to the new comment's human atomically: the
 	// whole attribution snapshot moves, not just the person columns (MUL-4302). An
 	// issue-assignee reaction is comment_source; a mention / thread-parent /
@@ -2434,6 +2463,10 @@ func (h *Handler) mergeCommentIntoPendingTask(ctx context.Context, issue db.Issu
 		return commentMergeError
 	}
 	overlay, connectedApps := h.TaskService.BuildRuntimeMCPOverlayForMerge(ctx, attr.UserID, trigger.Agent)
+	summary := h.TaskService.BuildCommentTriggerSummary(ctx, issue.WorkspaceID, newTriggerCommentID)
+	if windowSecs > 0 {
+		summary = pgtype.Text{String: strings.TrimSpace(summary.String + " " + coalescedWithAssignmentNote), Valid: true}
+	}
 	row, err := h.Queries.MergeCommentIntoPendingTask(ctx, db.MergeCommentIntoPendingTaskParams{
 		IssueID:                 issue.ID,
 		AgentID:                 trigger.Agent.ID,
@@ -2445,9 +2478,10 @@ func (h *Handler) mergeCommentIntoPendingTask(ctx context.Context, issue db.Issu
 		NewRuleVersionID:        attr.RuleVersionID,
 		NewTriggerEvidenceKind:  pgtype.Text{String: string(attr.EvidenceKind), Valid: attr.EvidenceKind != ""},
 		NewTriggerEvidenceRefID: attr.EvidenceRefID,
-		NewTriggerSummary:       h.TaskService.BuildCommentTriggerSummary(ctx, issue.WorkspaceID, newTriggerCommentID),
+		NewTriggerSummary:       summary,
 		NewRuntimeMcpOverlay:    overlay,
 		NewRuntimeConnectedApps: connectedApps,
+		AssignmentWindowSecs:    pgtype.Int4{Int32: windowSecs, Valid: windowSecs > 0},
 		HeadSha:                 headSha,
 	})
 	if err != nil {
@@ -2455,6 +2489,12 @@ func (h *Handler) mergeCommentIntoPendingTask(ctx context.Context, issue db.Issu
 			// No pre-claim (queued/deferred) task to merge into. The caller
 			// defers to completion reconcile when an active task exists, or
 			// enqueues fresh when none does.
+			return commentMergeNoPendingTask
+		}
+		if windowSecs > 0 && isUniqueViolation(err) {
+			// The comment's thread gained a pending task concurrently, so the
+			// assignment task cannot move into it. Treat as a miss: the fresh
+			// enqueue then loses the race and folds into that thread task.
 			return commentMergeNoPendingTask
 		}
 		// Unknown error: the pending task most likely still exists, so do NOT
@@ -2471,7 +2511,8 @@ func (h *Handler) mergeCommentIntoPendingTask(ctx context.Context, issue db.Issu
 		"issue_id", uuidToString(issue.ID),
 		"agent_id", uuidToString(trigger.Agent.ID),
 		"new_trigger_comment_id", uuidToString(newTriggerCommentID),
-		"coalesced_count", len(row.CoalescedCommentIds))
+		"coalesced_count", len(row.CoalescedCommentIds),
+		"assignment_window_secs", windowSecs)
 	return commentMergeSucceeded
 }
 
