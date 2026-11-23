@@ -40,16 +40,22 @@ const (
 	// full CLI invocation would be wasteful; this caches the verdict for a
 	// few heartbeat cycles so a token recovers automatically without manual
 	// intervention while staying cheap on the hot path.
-	DefaultTokenProbeInterval             = 5 * time.Minute
-	DefaultCodexHandshakeTimeout          = 30 * time.Second
-	DefaultCodexTurnInterruptTimeout      = 2 * time.Second
-	DefaultCodexThreadHandshakeTimeout    = 60 * time.Second
+	DefaultTokenProbeInterval          = 5 * time.Minute
+	DefaultCodexHandshakeTimeout       = 30 * time.Second
+	DefaultCodexTurnInterruptTimeout   = 2 * time.Second
+	DefaultCodexThreadHandshakeTimeout = 60 * time.Second
 	// DefaultOpenCodeIdleWatchdog shortens the no-message budget for OpenCode
 	// runs while they are not executing a tool. OpenCode streams text and tool
 	// events incrementally, so a completely silent interval here covers both a
 	// missing first model token and a stalled response stream. The generic
 	// AgentIdleWatchdog remains the global enable/disable switch.
 	DefaultOpenCodeIdleWatchdog = 10 * time.Minute
+	// DefaultCodexIdleWatchdog is the Codex no-tool idle window: a running
+	// Codex turn that emits nothing for this long while no tool call is in
+	// flight is ended as a retryable semantic-inactivity timeout. Zero (the
+	// default) disables it; the tool-unaware semantic timer and the generic
+	// watchdog still apply.
+	DefaultCodexIdleWatchdog time.Duration = 0
 	// DefaultAgentIdleWatchdog is the per-task safety net that force-stops a
 	// run when the backend has emitted no message for this long AND its
 	// message queue is empty. Backends like Claude Code can hang indefinitely
@@ -155,6 +161,7 @@ type Config struct {
 	// latency recorded in the Codex lifecycle logs.
 	CodexTurnInterruptTimeout   time.Duration
 	CodexThreadHandshakeTimeout time.Duration
+	CodexIdleWatchdog           time.Duration // Codex no-tool idle window; 0 disables. Only fires while no tool call is in flight, and ends the turn as retryable semantic inactivity
 	OpenCodeIdleWatchdog        time.Duration // OpenCode-specific no-message window; 0 falls back to AgentIdleWatchdog and values above it cannot extend the global bound
 	AgentIdleWatchdog           time.Duration // force-stop a run when the backend goes silent this long with an empty queue (0 = disabled)
 	AgentToolWatchdog           time.Duration // force-stop a run when a single tool call stays in flight (silent) this long (0 = never force-stop during a tool call, which now also covers a live Cursor background shell); defaults to AgentIdleWatchdog, so operators tune one number unless they deliberately want a wider tool budget
@@ -357,6 +364,15 @@ func LoadConfig(overrides Overrides) (Config, error) {
 	// cannot extend the global bound, and the global zero still disables the
 	// whole mechanism.
 	openCodeIdleWatchdog, err := durationFromEnv("MULTICA_OPENCODE_IDLE_WATCHDOG", DefaultOpenCodeIdleWatchdog)
+	if err != nil {
+		return Config{}, err
+	}
+	// MULTICA_CODEX_IDLE_WATCHDOG ends a Codex turn that has been completely
+	// silent for this long while no tool call is in flight (a hung app-server,
+	// GH mdostal/pantheon-v2#538). Unlike the semantic inactivity timer it is
+	// tool-aware, so it can be short without killing long builds or tests, and
+	// it reports as codex_semantic_inactivity so the task is retried.
+	codexIdleWatchdog, err := durationFromEnv("MULTICA_CODEX_IDLE_WATCHDOG", DefaultCodexIdleWatchdog)
 	if err != nil {
 		return Config{}, err
 	}
@@ -682,6 +698,7 @@ func LoadConfig(overrides Overrides) (Config, error) {
 		CodexTurnInterruptTimeout:       codexTurnInterruptTimeout,
 		CodexThreadHandshakeTimeout:     codexThreadHandshakeTimeout,
 		OpenCodeIdleWatchdog:            openCodeIdleWatchdog,
+		CodexIdleWatchdog:               codexIdleWatchdog,
 		AgentIdleWatchdog:               agentIdleWatchdog,
 		AgentToolWatchdog:               agentToolWatchdog,
 		ClaudeArgs:                      claudeArgs,

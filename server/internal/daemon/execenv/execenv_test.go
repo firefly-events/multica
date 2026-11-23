@@ -2707,6 +2707,7 @@ func TestPrepareCodexHomeSeedsFromShared(t *testing.T) {
 	os.WriteFile(filepath.Join(sharedHome, "config.json"), []byte(`{"model":"o3"}`), 0o644)
 	os.WriteFile(filepath.Join(sharedHome, "config.toml"), []byte(`model = "o3"`), 0o644)
 	os.WriteFile(filepath.Join(sharedHome, "instructions.md"), []byte("Be helpful."), 0o644)
+	os.WriteFile(filepath.Join(sharedHome, "AGENTS.md"), []byte("Commit and push as you go."), 0o644)
 	os.WriteFile(filepath.Join(sharedHome, "models_cache.json"), []byte(`{"models":["gpt-test"]}`), 0o644)
 	sharedPluginCache := filepath.Join(sharedHome, "plugins", "cache")
 	if err := os.MkdirAll(filepath.Join(sharedPluginCache, "superpowers"), 0o755); err != nil {
@@ -2795,6 +2796,16 @@ func TestPrepareCodexHomeSeedsFromShared(t *testing.T) {
 	data, _ = os.ReadFile(filepath.Join(codexHome, "instructions.md"))
 	if string(data) != "Be helpful." {
 		t.Errorf("instructions.md content = %q", data)
+	}
+
+	// The global AGENTS.md must reach the task home so operator-wide rules
+	// apply to daemon-run Codex tasks; an absent override stays absent.
+	data, _ = os.ReadFile(filepath.Join(codexHome, "AGENTS.md"))
+	if string(data) != "Commit and push as you go." {
+		t.Errorf("AGENTS.md content = %q", data)
+	}
+	if _, err := os.Lstat(filepath.Join(codexHome, "AGENTS.override.md")); !os.IsNotExist(err) {
+		t.Errorf("AGENTS.override.md should not exist when the shared home has none; err = %v", err)
 	}
 
 	// models_cache.json is a task-local snapshot so Codex can skip a cold model

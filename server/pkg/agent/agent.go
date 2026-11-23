@@ -55,6 +55,12 @@ type ExecOptions struct {
 	// daemon-wide zero still disables the watchdog entirely, and an in-flight
 	// tool continues to use the separate tool watchdog budget.
 	IdleWatchdogTimeout time.Duration
+	// CodexIdleTimeout ends a running Codex turn that has emitted no event at
+	// all for this long while no tool call is in flight. It is reported as a
+	// semantic inactivity timeout (retryable). A tool call in flight suspends
+	// it, so slow builds and tests are never cut short by it. Zero disables.
+	// Currently honoured by the codex backend only.
+	CodexIdleTimeout time.Duration
 	// HandshakeTimeout bounds startup RPCs for providers with a long-lived
 	// protocol transport. It is currently consumed by Codex app-server;
 	// zero uses the provider default rather than disabling the bound.

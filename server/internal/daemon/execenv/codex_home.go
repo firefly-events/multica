@@ -27,6 +27,13 @@ var codexCopiedFiles = []string{
 	"config.json",
 	"config.toml",
 	"instructions.md",
+	// Global agent instructions. Codex reads $CODEX_HOME/AGENTS.md (or the
+	// override) as user-level guidance and merges it with the workdir's
+	// AGENTS.md. Without these copies, rules an operator installs in
+	// ~/.codex/AGENTS.md never reach a daemon-run Codex task
+	// (mdostal/pantheon-v2#538).
+	"AGENTS.md",
+	"AGENTS.override.md",
 }
 
 const (

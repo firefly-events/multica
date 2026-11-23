@@ -1688,6 +1688,13 @@ func (b *codexBackend) executeOnce(ctx context.Context, prompt string, opts Exec
 		}
 		defer stopFirstTurnNoProgressTimer()
 
+		// Tool-aware idle timer (mdostal/pantheon-v2#538): a turn that is
+		// silent for opts.CodexIdleTimeout while no tool call is in flight is
+		// a hung app-server, not a slow build, so end it as retryable semantic
+		// inactivity instead of waiting for the much longer tool-unaware timer.
+		idle := newCodexIdleTracker(opts.CodexIdleTimeout)
+		defer idle.stop()
+
 		for waitingForTurn {
 			select {
 			case aborted := <-turnDone:
@@ -1696,6 +1703,7 @@ func (b *codexBackend) executeOnce(ctx context.Context, prompt string, opts Exec
 				lastSemanticActivity = time.Now()
 				lastSemanticActivityDescription = activity
 				resetTimer(semanticTimer, semanticInactivityTimeout)
+				idle.observe(activity)
 				if activity == "status:running" && !firstTurnStarted {
 					firstTurnStarted = true
 					firstItemWait.start(time.Now())
@@ -1729,6 +1737,33 @@ func (b *codexBackend) executeOnce(ctx context.Context, prompt string, opts Exec
 					"turn_id", turnID,
 					"timeout", firstTurnNoProgressTimeout.String(),
 					"last_activity", lastSemanticActivityDescription,
+				)
+			case <-idle.C():
+				if idle.inFlight() > 0 {
+					// A tool is still running: slow, not hung. Re-arm.
+					idle.rearm()
+					continue
+				}
+				waitingForTurn = false
+				finishFirstItemWait("codex_idle_timeout")
+				finalStatus = "timeout"
+				turnID := c.activeTurnID()
+				timeoutDiagnostic = codexTimeoutDiagnostic{
+					Kind:         codexTimeoutSemanticInactivity,
+					Timeout:      opts.CodexIdleTimeout,
+					LastActivity: lastSemanticActivityDescription,
+					ThreadID:     threadID,
+					TurnID:       turnID,
+					Model:        opts.Model,
+				}
+				b.cfg.Logger.Warn(CodexSemanticInactivityMarker,
+					"reason", "codex_idle_no_tool",
+					"pid", cmd.Process.Pid,
+					"thread_id", threadID,
+					"turn_id", turnID,
+					"timeout", opts.CodexIdleTimeout.String(),
+					"last_activity", lastSemanticActivityDescription,
+					"idle_for", time.Since(lastSemanticActivity).Round(time.Millisecond).String(),
 				)
 			case <-semanticTimer.C:
 				waitingForTurn = false
@@ -2143,6 +2178,57 @@ func resetTimer(timer *time.Timer, d time.Duration) {
 	}
 	timer.Reset(d)
 }
+
+// codexIdleTracker backs the tool-aware Codex idle timer. It counts tool
+// calls in flight from the semantic activity stream ("tool-use:<tool>" opens
+// one, "tool-result:<tool>" closes one) and re-arms on every event. Activity
+// sends are best-effort, so the count is clamped at zero: a dropped
+// tool-use can only make the timer fire later than it should, never on a
+// running tool, and a dropped tool-result keeps it suspended (falling back
+// to the semantic timer and the generic watchdog), never kills early.
+// A zero timeout disables it: C() then returns a nil channel.
+type codexIdleTracker struct {
+	timeout time.Duration
+	timer   *time.Timer
+	tools   int
+}
+
+func newCodexIdleTracker(timeout time.Duration) *codexIdleTracker {
+	t := &codexIdleTracker{timeout: timeout}
+	if timeout > 0 {
+		t.timer = time.NewTimer(timeout)
+	}
+	return t
+}
+
+func (t *codexIdleTracker) C() <-chan time.Time {
+	if t.timer == nil {
+		return nil
+	}
+	return t.timer.C
+}
+
+func (t *codexIdleTracker) observe(activity string) {
+	switch {
+	case strings.HasPrefix(activity, string(MessageToolUse)):
+		t.tools++
+	case strings.HasPrefix(activity, string(MessageToolResult)):
+		if t.tools > 0 {
+			t.tools--
+		}
+	}
+	t.rearm()
+}
+
+func (t *codexIdleTracker) inFlight() int { return t.tools }
+
+func (t *codexIdleTracker) rearm() {
+	if t.timer != nil {
+		resetTimer(t.timer, t.timeout)
+	}
+}
+
+func (t *codexIdleTracker) stop() { stopTimer(t.timer) }
 
 func stopTimer(timer *time.Timer) {
 	if timer == nil {
