@@ -46,6 +46,7 @@ MULTICA_PUBLIC_URL=https://api.multica.example.com
 | `LOG_LEVEL` | 应用默认 | 日志级别 |
 | `MULTICA_SHUTDOWN_HOLD_DURATION` | `0` | 收到终止信号后，开始优雅退出前等待多久 |
 | `MULTICA_RUNTIME_RECONNECT_GRACE` | `3h` | 运行时离线后可重新连接且不终止在途运行的宽限时间；低于 `150s` 时按 `150s` 处理 |
+| `MULTICA_TASK_PRIORITY_AGING_PER_HOUR` | `1` | 排队中的运行每等待 1 小时获得的优先级加成，使更新、更高优先级的运行只能推迟而不能无限饿死较早的运行（优先级范围 0-4）。设为 `0` 时严格按优先级、再按排队先后分配 |
 
 在 Kubernetes 中设置 shutdown hold 时，`terminationGracePeriodSeconds` 要大于 hold 与实际退出所需时间之和。
 

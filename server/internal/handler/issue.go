@@ -3797,6 +3797,13 @@ func (h *Handler) UpdateIssue(w http.ResponseWriter, r *http.Request) {
 	// it stops in-flight agent runs, so that implicit coupling is gone
 	// (MUL-4465). Deleting an issue still cancels its tasks (see DeleteIssue),
 	// because the tasks' owning issue ceases to exist.
+	//
+	// The one narrow exception: when the issue leaves in_review or changes
+	// assignee, the previous assignee's still-queued (never-claimed) runs are
+	// cancelled, since they were planned for a state the issue has left
+	// (pantheon-v2#589). Running work is untouched. It runs before the enqueue
+	// below so this update's own run is not cancelled or coalesced away.
+	h.cancelStaleQueuedTasks(r.Context(), prevIssue, issue, assigneeChanged, statusChanged)
 	if trigger, ok := h.IssueService.WillEnqueueRun(r.Context(),
 		service.IssueTriggerInput{
 			Issue:           issue,
@@ -4478,7 +4485,9 @@ func (h *Handler) BatchUpdateIssues(w http.ResponseWriter, r *http.Request) {
 		})
 
 		// Reassignment does not cancel existing tasks (#4963 / MUL-4113) —
-		// mirrors UpdateIssue. See that handler for the rationale.
+		// mirrors UpdateIssue. See that handler for the rationale, and for the
+		// narrow stale-queued-run exception applied here too (pantheon-v2#589).
+		h.cancelStaleQueuedTasks(r.Context(), prevIssue, issue, assigneeChanged, statusChanged)
 		//
 		// Same single predicate as UpdateIssue — batch must not grow its own
 		// copy of the enqueue rule (the historical source of four-entry-point
