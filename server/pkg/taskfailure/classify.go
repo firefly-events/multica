@@ -215,7 +215,17 @@ func Classify(rawError string) Reason {
 	//    Cursor can exit before its first stream event with a Node connect
 	//    ETIMEDOUT error. Keep that failed resume network-safe instead of
 	//    letting the exit-status wrapper trigger a fresh-session retry.
+	//    Resolver and connect failures (#540 in pantheon-v2): when the runtime
+	//    container loses DNS or egress, every backend fails before the provider
+	//    answers, and each CLI words it differently — Node's
+	//    `getaddrinfo EAI_AGAIN host` (gemini, codex, openclaw), glibc's
+	//    "Temporary failure in name resolution", Go's "no such host", curl's
+	//    "Could not resolve host". Before this only Claude's wording reached
+	//    this bucket; gemini's landed in agent_error.unknown, off the retry
+	//    allowlist and invisible to the daemon's egress breaker. See
+	//    isEgressFailure for the exact witnesses.
 	case isPiProviderNetworkError(lower), isCursorProviderNetworkError(lower),
+		isEgressFailure(lower),
 		containsAny(lower,
 			"stream disconnected",
 			opencodeStreamEndedPrefix,
@@ -447,6 +457,54 @@ func isCursorProviderNetworkError(lower string) bool {
 	return strings.HasPrefix(lower, "error: [unavailable] connect etimedout ")
 }
 
+// egressResolverWitnesses are resolver failures: the host had no working DNS
+// at all. Each is a fixed token from the resolver layer (Node's getaddrinfo
+// error codes, glibc's gai_strerror text, Go's net package, curl), so none of
+// them appears in ordinary agent prose. Matched against pre-lowercased text.
+// Mirror these into the MUL-1949 offline backfill SQL.
+var egressResolverWitnesses = []string{
+	"getaddrinfo",
+	"eai_again",
+	"enotfound",
+	"temporary failure in name resolution",
+	"name or service not known",
+	"no such host",
+	"could not resolve host",
+	"econnrefused",
+}
+
+// egressProviderHosts are the provider endpoints the bundled runtimes call.
+// ETIMEDOUT is only provider evidence when it names one of them: a bare
+// ETIMEDOUT is as likely a local tool or MCP server timing out (see
+// isCursorProviderNetworkError), and that must not be retried as a network
+// blip or counted toward the daemon's egress breaker.
+var egressProviderHosts = []string{
+	"anthropic.com",
+	"googleapis.com",
+	"openai.com",
+	"chatgpt.com",
+	"cursor.sh",
+	"openrouter.ai",
+}
+
+// isEgressFailure reports whether a lowercased error is a DNS or connect
+// failure toward the provider: any resolver witness, or ETIMEDOUT naming a
+// provider host.
+func isEgressFailure(lower string) bool {
+	if containsAny(lower, egressResolverWitnesses...) {
+		return true
+	}
+	return strings.Contains(lower, "etimedout") && containsAny(lower, egressProviderHosts...)
+}
+
+// IsEgressFailure is isEgressFailure for callers holding raw error text. The
+// daemon's egress breaker uses it to decide whether a failure says anything
+// about this host's network, independent of which bucket an earlier rule
+// picked.
+func IsEgressFailure(rawError string) bool {
+	return isEgressFailure(strings.ToLower(rawError))
+}
+
 func isPiProviderNetworkError(lower string) bool {
 	for _, message := range []string{"connection error.", "request timed out."} {
 		if lower == message ||
@@ -479,6 +537,17 @@ const (
 // old bucket cannot be describing some other, better-identified cause — it is
 // the same failure under a label that predates knowing what it was.
 var legacyOpencodeStreamEndedReasons = map[string]bool{
+	string(ReasonAgentProcessFailure): true,
+	string(ReasonAgentUnknown):        true,
+	"agent_error":                     true,
+}
+
+// legacyEgressReasons are the buckets a daemon predating isEgressFailure lands
+// a resolver/connect failure in: the catchall, process_failure from the CLI's
+// "exited with error: exit status 1" wrapper, and the pre-MUL-1949 coarse
+// agent_error. The witnesses are resolver tokens, so the old bucket cannot be
+// describing a better-identified cause.
+var legacyEgressReasons = map[string]bool{
 	string(ReasonAgentProcessFailure): true,
 	string(ReasonAgentUnknown):        true,
 	"agent_error":                     true,
@@ -543,6 +612,13 @@ func NormalizeDaemonReason(reason, rawError string) Reason {
 	if legacyOpencodeStreamEndedReasons[reason] &&
 		(strings.HasPrefix(lowerError, opencodeStreamEndedPrefix) ||
 			strings.HasPrefix(lowerError, codeartsStreamEndedPrefix)) {
+		return ReasonAgentProviderNetwork
+	}
+	// pantheon-v2 #540: same mixed-version gap for resolver failures. A daemon
+	// predating isEgressFailure reports gemini's `getaddrinfo EAI_AGAIN` as the
+	// catchall (or process_failure, from the CLI's exit-status wrapper), so a
+	// dead-DNS window terminated every gemini task on its first attempt.
+	if legacyEgressReasons[reason] && isEgressFailure(lowerError) {
 		return ReasonAgentProviderNetwork
 	}
 	// #7112: same mixed-version gap. A daemon predating the OpenClaw CLI
