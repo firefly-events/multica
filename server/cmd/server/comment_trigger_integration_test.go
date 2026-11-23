@@ -672,7 +672,9 @@ func TestDeleteCommentCancelsTriggeredTasks(t *testing.T) {
 }
 
 // TestCommentThreadsQueueSeparatelyFromAssignment verifies that each root
-// comment queues independently of other threads and the assignment task.
+// comment queues independently of other threads, except that a comment posted
+// within 60s of the assignment folds into the assignment run (PANT-1442): a
+// reassign plus its instruction comment is one handoff, not two runs.
 func TestCommentThreadsQueueSeparatelyFromAssignment(t *testing.T) {
 	agentID := getAgentID(t)
 	issueID := createIssueAssignedToAgent(t, "Coalescing test", agentID)
@@ -682,12 +684,13 @@ func TestCommentThreadsQueueSeparatelyFromAssignment(t *testing.T) {
 		resp.Body.Close()
 	})
 
-	// Distinct root comments must not merge with each other or the assignment.
+	// The first root comment joins the fresh assignment run; the second root
+	// comment is a separate thread and gets its own run.
 	first := postComment(t, issueID, "First comment", nil)
 	second := postComment(t, issueID, "Second comment", nil)
 
-	if n := countPendingTasks(t, issueID); n != 3 {
-		t.Fatalf("expected assignment plus two independent thread tasks, got %d", n)
+	if n := countPendingTasks(t, issueID); n != 2 {
+		t.Fatalf("expected the assignment run (carrying the first comment) plus one thread task, got %d", n)
 	}
 	for _, id := range []string{first, second} {
 		var count int
