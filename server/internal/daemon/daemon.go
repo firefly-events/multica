@@ -447,6 +447,11 @@ type Daemon struct {
 	// local state change that makes a provider registrable again.
 	agentDiscoveryKick chan struct{}
 
+	// egress is the per-runtime egress circuit breaker (pantheon-v2 #540; see
+	// egress_breaker.go). Nil when disabled or in bare test fixtures — every
+	// method is nil-safe.
+	egress *egressBreaker
+
 	versionsMu    sync.RWMutex      // guards agentVersions
 	agentVersions map[string]string // provider -> detected CLI version (set during registration)
 
@@ -742,6 +747,9 @@ func New(cfg Config, logger *slog.Logger) *Daemon {
 		reconcile:                 newReconcileBroadcaster(),
 		workspaceChanges:          newWorkspaceChangeSignal(),
 		wsRPC:                     newWSRPCClient(wsRPCResponseGrace),
+	}
+	if egressBreakerEnabled() {
+		d.egress = newEgressBreaker(nil)
 	}
 	d.activeEnvRootsCond = sync.NewCond(&d.activeEnvRootsMu)
 	d.activeStoresCond = sync.NewCond(&d.activeStoresMu)
@@ -2164,6 +2172,9 @@ func (d *Daemon) Run(ctx context.Context) error {
 	go d.gcLoop(ctx)
 	go d.autoUpdateLoop(ctx)
 	go d.tokenRenewalLoop(ctx)
+	// Egress preflight + breaker probes (pantheon-v2 #540). Gates the runtimes
+	// registered so far until their provider is reachable; never fails Run.
+	d.startEgressBreaker(ctx, taskWakeups)
 
 	// Preflight succeeded and the background loops are up: the daemon has
 	// registered its runtimes and can now claim and run tasks. Flip /health
@@ -5433,7 +5444,9 @@ func (d *Daemon) runBatchPoller(pollerCtx, parentCtx context.Context, sem chan i
 			return
 		}
 
-		runtimeIDs := d.allRuntimeIDs()
+		// Runtimes whose egress breaker is open claim nothing until the probe
+		// loop closes it (and wakes this loop) — pantheon-v2 #540.
+		runtimeIDs := d.egress.FilterHealthy(d.allRuntimeIDs())
 		if len(runtimeIDs) == 0 {
 			if err := sleepWithContextOrWakeup(pollerCtx, d.cfg.PollInterval, wakeup); err != nil {
 				return
@@ -5949,6 +5962,7 @@ func (d *Daemon) handleTask(ctx context.Context, task Task, slot int) {
 		return
 	}
 
+	d.applyEgressBreaker(task, &result, taskLog)
 	d.reportTaskResult(ctx, task.ID, result, taskLog)
 
 	// Write GC metadata after the task finishes so the periodic GC loop

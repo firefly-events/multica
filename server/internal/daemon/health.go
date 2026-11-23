@@ -83,6 +83,10 @@ type HealthResponse struct {
 	// older consumers see no change. Diagnostic only: nothing keys off it.
 	ReloadPendingReason string            `json:"reload_pending_reason,omitempty"`
 	Workspaces          []healthWorkspace `json:"workspaces"`
+	// Egress reports the egress circuit breaker (pantheon-v2 #540):
+	// egress_degraded is true while any runtime is paused because its provider
+	// is unreachable. Omitted when the breaker is disabled.
+	Egress *healthEgress `json:"egress,omitempty"`
 }
 
 type healthWorkspace struct {
@@ -354,6 +358,7 @@ func (d *Daemon) healthHandler(startedAt time.Time) http.HandlerFunc {
 
 			ReloadPendingReason: d.reloadPending(),
 			Workspaces:          wsList,
+			Egress:              d.egress.Snapshot(),
 		}
 		if reporter, ok := d.repoCache.(interface{ Activity() repocache.Activity }); ok {
 			activity := reporter.Activity()
