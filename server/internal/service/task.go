@@ -2674,6 +2674,40 @@ func (s *TaskService) CancelTasksForIssue(ctx context.Context, issueID pgtype.UU
 	return nil
 }
 
+// CancelQueuedTasksForIssueAgent cancels one agent's queued and deferred tasks
+// on an issue, leaving dispatched and running work alone. The issue handlers
+// call it when an issue leaves in_review or changes assignee, for the agent
+// that held it, so runs planned for the old state never start (pantheon-v2#589).
+// Returns the cancelled rows.
+func (s *TaskService) CancelQueuedTasksForIssueAgent(ctx context.Context, issueID, agentID pgtype.UUID) ([]db.AgentTaskQueue, error) {
+	var cancelled []db.AgentTaskQueue
+	// Same transaction shape as CancelTasksForIssue: the settlement must commit
+	// with the cancel.
+	if err := s.runInTx(ctx, func(qtx *db.Queries) error {
+		var err error
+		cancelled, err = qtx.CancelQueuedTasksByIssueAndAgent(ctx, db.CancelQueuedTasksByIssueAndAgentParams{
+			IssueID: issueID,
+			AgentID: agentID,
+		})
+		if err != nil {
+			return err
+		}
+		return SettleDeliveredDelegatedFailureRecoveries(ctx, qtx, cancelled...)
+	}); err != nil {
+		return nil, err
+	}
+	if len(cancelled) == 0 {
+		return nil, nil
+	}
+	for _, t := range cancelled {
+		s.captureTaskCancelled(ctx, t)
+		s.broadcastTaskEvent(ctx, protocol.EventTaskCancelled, t)
+	}
+	s.ReconcileAgentStatus(ctx, agentID)
+	s.notifyTasksFinished(cancelled)
+	return cancelled, nil
+}
+
 // distinctAgentIDs returns each agent id appearing in the cancelled rows once,
 // preserving first-seen order. Bulk cancellations frequently stop several tasks
 // owned by the same agent; reconciling per distinct agent (rather than per row)
@@ -3572,8 +3606,8 @@ func (s *TaskService) claimTask(ctx context.Context, agentID, runtimeID pgtype.U
 		t0 = time.Now()
 		reclaimCheckAfter = t0.Add(claimResponseRecoveryWindow + ReclaimCheckHintSafetyMargin)
 		task, err := qtx.ClaimAgentTask(ctx, db.ClaimAgentTaskParams{
-			AgentID:          agentID,
-			RuntimeID:        claimRuntimeID,
+			AgentID:              agentID,
+			RuntimeID:            claimRuntimeID,
 			PrepareLeaseSecs:     prepareLeaseDuration.Seconds(),
 			RuntimeStaleSecs:     RuntimeClaimFreshnessSeconds,
 			PriorityAgingPerHour: PriorityAgingPerHour,
